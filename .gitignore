@@ -15,6 +15,9 @@ venv/
 # Models
 models/
 
+# Prediction tracking database
+data/
+
 # IDE
 .vscode/
 .idea/

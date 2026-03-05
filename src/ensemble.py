@@ -68,6 +68,60 @@ def compute_ensemble_confidence(
     return confidence
 
 
+def auto_tune_weights(
+    actual: np.ndarray,
+    lstm_preds: np.ndarray,
+    xgb_preds: np.ndarray,
+    weight_range: tuple[float, float] = (0.20, 0.90),
+    step: float = 0.05,
+) -> dict:
+    """Find the optimal xgb_base_weight by grid search on backtest data.
+
+    Tests every weight from weight_range[0] to weight_range[1] in increments of step.
+    Returns the weight that minimizes RMSE on the backtest.
+    """
+    n = min(len(lstm_preds), len(xgb_preds), len(actual))
+    if n < 30:
+        return {"optimal_weight": 0.55, "best_rmse": float("inf"), "all_results": []}
+
+    actual = actual[:n]
+    lstm = lstm_preds[:n]
+    xgb = xgb_preds[:n]
+
+    best_weight = 0.55
+    best_rmse = float("inf")
+    all_results = []
+
+    w = weight_range[0]
+    while w <= weight_range[1] + 1e-9:
+        ensemble = w * xgb + (1 - w) * lstm
+        rmse = float(np.sqrt(np.mean((actual - ensemble) ** 2)))
+
+        # Directional accuracy
+        actual_dir = np.diff(actual) > 0
+        pred_dir = np.diff(ensemble) > 0
+        m = min(len(actual_dir), len(pred_dir))
+        dir_acc = float(np.mean(actual_dir[:m] == pred_dir[:m]) * 100) if m > 0 else 0
+
+        all_results.append({
+            "xgb_weight": round(w, 2),
+            "rmse": round(rmse, 4),
+            "directional_accuracy": round(dir_acc, 1),
+        })
+
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_weight = round(w, 2)
+
+        w += step
+
+    return {
+        "optimal_weight": best_weight,
+        "best_rmse": round(best_rmse, 4),
+        "all_results": all_results,
+    }
+
+
 def evaluate_models(
     actual: np.ndarray,
     lstm_preds: np.ndarray,

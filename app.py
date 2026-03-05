@@ -15,6 +15,13 @@ from src.feature_engineering import add_technical_indicators
 from src.predictor import train_and_predict, predict_with_saved_model
 from src.sentiment import is_sentiment_available, analyze_sentiment
 from src.model import load_saved_model
+from src.prediction_tracker import (
+    init_db, log_predictions, validate_pending_predictions,
+    get_accuracy_metrics, get_prediction_history, get_tracked_tickers,
+    should_relearn, relearn_models, compute_adaptive_weights,
+    get_current_model_version,
+)
+from datetime import date
 from src.swing_trading import (
     calculate_pivot_points, calculate_support_resistance,
     calculate_fibonacci_retracements, calculate_atr_stop_loss,
@@ -26,6 +33,17 @@ from src.scalping import (
 )
 
 st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="wide")
+
+# ============================================================
+# PREDICTION TRACKING — init DB & auto-validate on load
+# ============================================================
+init_db()
+
+@st.cache_data(ttl=300)
+def _auto_validate():
+    return validate_pending_predictions()
+
+_auto_validate()
 
 # ============================================================
 # CLEAN DARK THEME CSS
@@ -173,9 +191,9 @@ with st.sidebar:
 # ============================================================
 # TABS
 # ============================================================
-tab_portfolio, tab_screener, tab_chart, tab_predict, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment = st.tabs([
+tab_portfolio, tab_screener, tab_chart, tab_predict, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment, tab_accuracy = st.tabs([
     "💼 Portfolio", "🔍 Screener", "📊 Chart", "🤖 Predictions",
-    "📈 Swing", "⚡ Scalping", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment",
+    "📈 Swing", "⚡ Scalping", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment", "🎯 Accuracy",
 ])
 
 # ============================================================
@@ -377,6 +395,18 @@ with tab_predict:
         progress_bar.progress(1.0, text="Training complete!")
         status_text.empty()
         st.session_state["prediction_results"] = results
+        try:
+            log_predictions(
+                ticker=ticker, prediction_date=date.today(),
+                target_dates=results["prediction_dates"],
+                ensemble_prices=results["predictions"],
+                lstm_prices=results["lstm_predictions"],
+                xgb_prices=results["xgb_predictions"],
+                confidence=results.get("confidence", []),
+                last_known_price=results["last_price"],
+            )
+        except Exception:
+            pass
 
     if load_btn:
         with st.spinner("Generating predictions..."):
@@ -384,6 +414,18 @@ with tab_predict:
                                                use_market_context=use_market_context, xgb_base_weight=xgb_weight)
         if results:
             st.session_state["prediction_results"] = results
+            try:
+                log_predictions(
+                    ticker=ticker, prediction_date=date.today(),
+                    target_dates=results["prediction_dates"],
+                    ensemble_prices=results["predictions"],
+                    lstm_prices=results["lstm_predictions"],
+                    xgb_prices=results["xgb_predictions"],
+                    confidence=results.get("confidence", []),
+                    last_known_price=results["last_price"],
+                )
+            except Exception:
+                pass
 
     if "prediction_results" in st.session_state:
         results = st.session_state["prediction_results"]
@@ -445,6 +487,15 @@ with tab_predict:
                 verdict_box(f"⚠️ <b>Directional Accuracy: {ed:.1f}%</b> — modest. Use as one input, not sole decision maker. Avg error: ₹{er:.2f}", "neutral")
             if bm.get("improvement_pct", 0) > 0:
                 st.success(f"Ensemble is {bm['improvement_pct']:.1f}% better than LSTM alone")
+
+            # Show auto-tuned weight
+            if "auto_tune" in results:
+                at = results["auto_tune"]
+                used_w = results.get("used_xgb_weight", xgb_weight)
+                help_box(
+                    f"Auto-tuned optimal XGBoost weight: <b>{at['optimal_weight']:.2f}</b> "
+                    f"(RMSE: ₹{at['best_rmse']:.2f}). Using: <b>{used_w:.2f}</b>"
+                )
 
             with st.expander("Model Comparison"):
                 mc1, mc2, mc3 = st.columns(3)
@@ -1205,6 +1256,218 @@ with tab_sector:
                             continue
                 if risk_rows:
                     st.dataframe(pd.DataFrame(risk_rows), use_container_width=True, hide_index=True)
+
+
+# ============================================================
+# TAB 10: ACCURACY TRACKING
+# ============================================================
+with tab_accuracy:
+    st.subheader("🎯 Prediction Accuracy Tracker")
+    help_box("Track how accurate past AI predictions were. Predictions are logged when you run them, "
+             "and validated automatically against actual prices the next day.")
+
+    # Ticker filter
+    tracked = get_tracked_tickers()
+
+    if not tracked:
+        st.info("No predictions logged yet. Go to the Predictions tab and run a prediction to start tracking.")
+    else:
+        acc_col1, acc_col2 = st.columns([1, 3])
+        with acc_col1:
+            acc_ticker_options = ["All Tickers"] + tracked
+            acc_ticker = st.selectbox("Filter by ticker", acc_ticker_options, key="acc_ticker")
+            filter_ticker = None if acc_ticker == "All Tickers" else acc_ticker
+
+            if st.button("🔄 Validate Now", help="Fetch actual prices for pending predictions"):
+                with st.spinner("Validating predictions..."):
+                    val_result = validate_pending_predictions(filter_ticker)
+                st.success(f"Validated {val_result['validated_count']} predictions")
+                if val_result["errors"]:
+                    for err in val_result["errors"]:
+                        st.warning(err)
+                st.cache_data.clear()
+                st.rerun()
+
+        # Summary metrics
+        metrics = get_accuracy_metrics(filter_ticker)
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total Logged", metrics["total_predictions"])
+        m2.metric("Validated", metrics["validated_count"])
+        m3.metric("Direction Accuracy",
+                  f"{metrics['direction_accuracy_pct']}%",
+                  help="% of predictions where predicted direction (up/down) matched actual")
+        m4.metric("Avg Error",
+                  f"{metrics['avg_error_pct']}%",
+                  help="Average absolute error between predicted and actual price")
+        m5.metric("Within Confidence",
+                  f"{metrics['within_confidence_pct']}%",
+                  help="% of predictions where actual price fell within the confidence band")
+
+        if metrics["direction_accuracy_pct"] >= 60:
+            verdict_box(f"Strong prediction accuracy ({metrics['direction_accuracy_pct']}% direction correct)", "bullish")
+        elif metrics["direction_accuracy_pct"] >= 50:
+            verdict_box(f"Moderate accuracy ({metrics['direction_accuracy_pct']}% direction correct)", "neutral")
+        elif metrics["validated_count"] > 0:
+            verdict_box(f"Low accuracy ({metrics['direction_accuracy_pct']}% direction correct) — consider relearning", "bearish")
+
+        # Prediction history table
+        history_df = get_prediction_history(filter_ticker, limit=100)
+
+        if not history_df.empty:
+            st.markdown("### Prediction History")
+
+            # Charts for validated predictions
+            validated_df = history_df[history_df["actual_price"].notna()].copy()
+
+            if not validated_df.empty:
+                chart_col1, chart_col2 = st.columns(2)
+
+                with chart_col1:
+                    st.markdown("#### Predicted vs Actual")
+                    fig_pva = go.Figure()
+                    fig_pva.add_trace(go.Scatter(
+                        x=validated_df["target_date"], y=validated_df["actual_price"],
+                        name="Actual", line=dict(color=C_CYAN, width=2),
+                    ))
+                    fig_pva.add_trace(go.Scatter(
+                        x=validated_df["target_date"], y=validated_df["predicted_price"],
+                        name="Predicted", line=dict(color=C_AMBER, width=2, dash="dash"),
+                    ))
+                    # Confidence band
+                    if "confidence_upper" in validated_df.columns:
+                        conf_df = validated_df[validated_df["confidence_upper"].notna()]
+                        if not conf_df.empty:
+                            fig_pva.add_trace(go.Scatter(
+                                x=conf_df["target_date"], y=conf_df["confidence_upper"],
+                                line=dict(width=0), showlegend=False,
+                            ))
+                            fig_pva.add_trace(go.Scatter(
+                                x=conf_df["target_date"], y=conf_df["confidence_lower"],
+                                fill="tonexty", fillcolor="rgba(245, 158, 11, 0.1)",
+                                line=dict(width=0), name="Confidence Band",
+                            ))
+                    fig_pva.update_layout(height=350, **CHART_LAYOUT)
+                    st.plotly_chart(fig_pva, use_container_width=True)
+
+                with chart_col2:
+                    st.markdown("#### Rolling Direction Accuracy")
+                    if len(validated_df) >= 5:
+                        validated_df = validated_df.sort_values("target_date")
+                        validated_df["rolling_acc"] = validated_df["direction_correct"].rolling(
+                            window=min(10, len(validated_df)), min_periods=3
+                        ).mean() * 100
+
+                        fig_roll = go.Figure()
+                        fig_roll.add_trace(go.Scatter(
+                            x=validated_df["target_date"], y=validated_df["rolling_acc"],
+                            name="Rolling Accuracy %", line=dict(color=C_GREEN, width=2),
+                            fill="tozeroy", fillcolor="rgba(16, 185, 129, 0.1)",
+                        ))
+                        fig_roll.add_hline(y=50, line_dash="dash", line_color=C_RED,
+                                           annotation_text="50% (random)")
+                        fig_roll.update_layout(height=350, yaxis_title="Accuracy %", **CHART_LAYOUT)
+                        st.plotly_chart(fig_roll, use_container_width=True)
+                    else:
+                        st.info("Need at least 5 validated predictions for rolling accuracy chart.")
+
+                # Per-model comparison
+                if "lstm_price" in validated_df.columns and "xgb_price" in validated_df.columns:
+                    model_df = validated_df[validated_df["lstm_price"].notna() & validated_df["xgb_price"].notna()]
+                    if not model_df.empty:
+                        with st.expander("📊 LSTM vs XGBoost Comparison"):
+                            lstm_err = (model_df["lstm_price"] - model_df["actual_price"]).abs() / model_df["actual_price"] * 100
+                            xgb_err = (model_df["xgb_price"] - model_df["actual_price"]).abs() / model_df["actual_price"] * 100
+                            ens_err = (model_df["predicted_price"] - model_df["actual_price"]).abs() / model_df["actual_price"] * 100
+
+                            mc1, mc2, mc3 = st.columns(3)
+                            mc1.metric("LSTM Avg Error", f"{lstm_err.mean():.2f}%")
+                            mc2.metric("XGBoost Avg Error", f"{xgb_err.mean():.2f}%")
+                            mc3.metric("Ensemble Avg Error", f"{ens_err.mean():.2f}%")
+
+                            better_model = "XGBoost" if xgb_err.mean() < lstm_err.mean() else "LSTM"
+                            verdict_box(f"{better_model} has been more accurate recently", "neutral")
+
+            # Display history table
+            display_df = history_df.copy()
+            display_df["Status"] = display_df["actual_price"].apply(
+                lambda x: "✅ Validated" if pd.notna(x) else "⏳ Pending"
+            )
+            display_df["Direction"] = display_df["direction_correct"].apply(
+                lambda x: "✅ Correct" if x == 1 else ("❌ Wrong" if x == 0 else "—")
+            )
+            show_cols = ["ticker", "prediction_date", "target_date", "predicted_price",
+                         "actual_price", "error_pct", "Direction", "Status"]
+            available_cols = [c for c in show_cols if c in display_df.columns]
+            st.dataframe(
+                display_df[available_cols].rename(columns={
+                    "ticker": "Ticker", "prediction_date": "Predicted On",
+                    "target_date": "Target Date", "predicted_price": "Predicted ₹",
+                    "actual_price": "Actual ₹", "error_pct": "Error %",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+        # Relearning controls
+        st.markdown("---")
+        st.markdown("### 🔄 Model Relearning")
+        help_box("When prediction accuracy drops, you can retrain the model using recent data. "
+                 "This fine-tunes LSTM with a low learning rate and retrains XGBoost from scratch. "
+                 "Ensemble weights are automatically adjusted based on which model performed better.")
+
+        relearn_ticker = st.selectbox("Select ticker to relearn", tracked, key="relearn_ticker")
+
+        if relearn_ticker:
+            version = get_current_model_version(relearn_ticker)
+            can_relearn, reason = should_relearn(relearn_ticker)
+
+            rl1, rl2, rl3 = st.columns(3)
+            rl1.metric("Model Version", version if version > 0 else "Initial")
+            rl2.metric("Adaptive XGB Weight", f"{compute_adaptive_weights(relearn_ticker):.2f}")
+
+            relearn_metrics = get_accuracy_metrics(relearn_ticker)
+            rl3.metric("Direction Accuracy", f"{relearn_metrics['direction_accuracy_pct']}%")
+
+            if can_relearn:
+                verdict_box(f"Relearning recommended: {reason}", "bearish")
+                if st.button(f"🔄 Relearn {relearn_ticker}", type="primary"):
+                    progress = st.empty()
+                    status = st.empty()
+                    def relearn_progress(msg, pct):
+                        progress.progress(pct, text=msg)
+                    with st.spinner("Relearning..."):
+                        result = relearn_models(relearn_ticker, progress_callback=relearn_progress)
+                    progress.progress(1.0, text="Relearning complete!")
+                    if "error" in result:
+                        st.error(result["error"])
+                    else:
+                        st.success(
+                            f"Model updated: v{result['old_version']} → v{result['new_version']}. "
+                            f"New XGBoost weight: {result['new_xgb_weight']:.2f}"
+                        )
+                        st.cache_data.clear()
+                        st.rerun()
+            else:
+                verdict_box(f"No relearning needed: {reason}", "neutral")
+
+            # Manual relearn override
+            with st.expander("Force relearn (override criteria)"):
+                if st.button(f"Force relearn {relearn_ticker}"):
+                    progress = st.empty()
+                    def force_progress(msg, pct):
+                        progress.progress(pct, text=msg)
+                    with st.spinner("Relearning..."):
+                        result = relearn_models(relearn_ticker, progress_callback=force_progress)
+                    progress.progress(1.0, text="Done!")
+                    if "error" in result:
+                        st.error(result["error"])
+                    else:
+                        st.success(
+                            f"Model updated: v{result['old_version']} → v{result['new_version']}. "
+                            f"New XGBoost weight: {result['new_xgb_weight']:.2f}"
+                        )
+                        st.cache_data.clear()
+                        st.rerun()
 
 
 # ============================================================

@@ -110,6 +110,41 @@ def train_model(
     return model, scaler, history.history
 
 
+def fine_tune_model(
+    model: Model,
+    scaler: MinMaxScaler,
+    feature_data: np.ndarray,
+    epochs: int = 15,
+    learning_rate: float = 1e-5,
+) -> tuple[Model, dict]:
+    """Fine-tune an existing LSTM model on recent data with a low learning rate.
+
+    Uses only the most recent ~500 trading days to focus on recent patterns.
+    Low learning rate prevents catastrophic forgetting.
+    """
+    from tensorflow.keras.optimizers import Adam
+
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss="huber", metrics=["mae"])
+
+    scaled_data = scaler.transform(feature_data)
+    recent = scaled_data[-500:] if len(scaled_data) > 500 else scaled_data
+    X, y = prepare_sequences(recent)
+
+    if len(X) == 0:
+        return model, {}
+
+    history = model.fit(
+        X, y,
+        epochs=epochs,
+        batch_size=32,
+        validation_split=0.15,
+        verbose=0,
+        callbacks=[EarlyStopping(patience=5, restore_best_weights=True)],
+    )
+
+    return model, history.history
+
+
 def save_model(model: Model, scaler: MinMaxScaler, ticker: str):
     """Save model and scaler to disk."""
     os.makedirs(MODELS_DIR, exist_ok=True)

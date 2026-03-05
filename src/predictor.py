@@ -15,6 +15,7 @@ from src.xgboost_model import (
 )
 from src.ensemble import (
     compute_horizon_weights, blend_predictions, compute_ensemble_confidence,
+    auto_tune_weights,
 )
 
 
@@ -103,10 +104,28 @@ def train_and_predict(
             xgb_backtest_vals.append(pred)
     xgb_backtest = np.array(xgb_backtest_vals[:len(actual_prices)])
 
-    # Ensemble backtest
+    # Ensemble backtest — auto-tune optimal weight
     n_eval = min(len(lstm_backtest), len(xgb_backtest))
-    weights = compute_horizon_weights(1, xgb_base_weight=xgb_base_weight)
-    xgb_w, lstm_w = weights[0]
+
+    tune_result = auto_tune_weights(
+        actual_prices[:n_eval], lstm_backtest[:n_eval], xgb_backtest[:n_eval],
+    )
+    optimal_weight = tune_result["optimal_weight"]
+
+    # Use the better of: user-specified weight or auto-tuned weight
+    # Auto-tune wins if it found a meaningfully better RMSE
+    user_weights = compute_horizon_weights(1, xgb_base_weight=xgb_base_weight)
+    user_xgb_w, user_lstm_w = user_weights[0]
+    user_ensemble = user_xgb_w * xgb_backtest[:n_eval] + user_lstm_w * lstm_backtest[:n_eval]
+    user_rmse = float(np.sqrt(np.mean((actual_prices[:n_eval] - user_ensemble) ** 2)))
+
+    if tune_result["best_rmse"] < user_rmse * 0.98:  # Auto-tune at least 2% better
+        best_xgb_weight = optimal_weight
+    else:
+        best_xgb_weight = xgb_base_weight
+
+    weights_1d = compute_horizon_weights(1, xgb_base_weight=best_xgb_weight)
+    xgb_w, lstm_w = weights_1d[0]
     ensemble_backtest = xgb_w * xgb_backtest[:n_eval] + lstm_w * lstm_backtest[:n_eval]
 
     eval_df = pd.DataFrame({
@@ -130,8 +149,8 @@ def train_and_predict(
         xgb_model, df_with_lags, available_xgb_cols, forecast_days,
     )
 
-    # Ensemble blend
-    weights = compute_horizon_weights(forecast_days, xgb_base_weight=xgb_base_weight)
+    # Ensemble blend with auto-tuned weight
+    weights = compute_horizon_weights(forecast_days, xgb_base_weight=best_xgb_weight)
     ensemble_future = blend_predictions(lstm_future, xgb_future, weights)
 
     # Future dates
@@ -167,6 +186,8 @@ def train_and_predict(
         "feature_importance": xgb_metrics.get("feature_importance", {}),
         "ensemble_weights": weights,
         "last_price": df["Close"].iloc[-1],
+        "auto_tune": tune_result,
+        "used_xgb_weight": best_xgb_weight,
     }
 
 
