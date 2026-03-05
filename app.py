@@ -865,8 +865,8 @@ with tab_portfolio:
 # TAB 7: SCREENER
 # ========================================================================
 with tab_screener:
-    help_box("<b>Stock Screener</b> scans multiple stocks and ranks them by swing trading signal strength. "
-             "It checks RSI, MACD, ADX, moving averages, and more for each stock to find the best opportunities.")
+    help_box("<b>Stock Screener</b> scans multiple stocks for both <b>swing trading</b> and <b>scalping</b> opportunities. "
+             "It checks RSI, MACD, ADX, moving averages, VWAP, EMAs, and more to find the best stock to buy for each strategy.")
 
     scr_c1, scr_c2 = st.columns([2, 1])
     with scr_c1:
@@ -881,16 +881,21 @@ with tab_screener:
         else:
             scan_tickers = SECTOR_STOCKS[scan_scope]
 
+        total_steps = len(scan_tickers) * 2  # swing + scalp pass
         progress = st.progress(0, text="Scanning stocks...")
-        with st.spinner("Analyzing each stock..."):
+        with st.spinner("Analyzing each stock for swing & scalping..."):
             scan_results = []
+            scalp_results = []
             for idx, t in enumerate(scan_tickers):
-                progress.progress((idx + 1) / len(scan_tickers), text=f"Scanning {t.replace('.NS', '')}...")
+                # --- Swing scan ---
+                progress.progress((idx * 2 + 1) / total_steps, text=f"Swing scan: {t.replace('.NS', '')}...")
                 try:
                     t_df = fetch_stock_data(t, period_years=1)
                     t_df = add_technical_indicators(t_df)
                     t_signal = generate_swing_signals(t_df)
                     t_latest = t_df.iloc[-1]
+                    t_setup = calculate_trade_setup(t_df, t_signal)
+                    t_patterns = identify_swing_patterns(t_df)
                     scan_results.append({
                         "ticker": t,
                         "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -898,28 +903,134 @@ with tab_screener:
                         "signal": t_signal.signal,
                         "strength": t_signal.strength,
                         "confidence": t_signal.confidence,
+                        "reasons": t_signal.reasons,
                         "rsi": t_latest.get("RSI", 0),
                         "macd": t_latest.get("MACD", 0),
                         "macd_signal": t_latest.get("MACD_Signal", 0),
                         "adx": t_latest.get("ADX", 0),
                         "volume_ratio": t_latest.get("Volume_Ratio", 1),
+                        "setup": t_setup,
+                        "patterns": t_patterns,
                     })
                 except Exception:
-                    continue
+                    pass
+
+                # --- Scalp scan ---
+                progress.progress((idx * 2 + 2) / total_steps, text=f"Scalp scan: {t.replace('.NS', '')}...")
+                try:
+                    intra_df = fetch_intraday_data(t, interval="5m", period="5d")
+                    intra_df = add_scalping_indicators(intra_df)
+                    s_signal = generate_scalp_signal(intra_df)
+                    s_micro = get_market_microstructure(intra_df)
+                    s_levels = get_scalping_levels(intra_df)
+                    scalp_results.append({
+                        "ticker": t,
+                        "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
+                        "price": intra_df["Close"].iloc[-1],
+                        "signal": s_signal.signal,
+                        "strength": s_signal.strength,
+                        "confidence": s_signal.confidence,
+                        "reasons": s_signal.reasons,
+                        "entry": s_signal.entry_price,
+                        "stop_loss": s_signal.stop_loss,
+                        "target_1": s_signal.target_1,
+                        "target_2": s_signal.target_2,
+                        "risk_reward": s_signal.risk_reward,
+                        "scalpability": s_micro["scalpability_score"],
+                        "trend": s_micro["trend"],
+                        "volatility": s_micro["volatility_regime"],
+                        "vwap": s_levels["vwap"],
+                    })
+                except Exception:
+                    pass
+
             scan_results.sort(key=lambda x: x["confidence"], reverse=True)
+            scalp_results.sort(key=lambda x: x["confidence"], reverse=True)
             progress.progress(1.0, text="Scan complete!")
 
         st.session_state["scan_results"] = scan_results
+        st.session_state["scalp_results"] = scalp_results
 
     if "scan_results" in st.session_state and st.session_state["scan_results"]:
         results = st.session_state["scan_results"]
+        scalp_res = st.session_state.get("scalp_results", [])
 
         # Top picks
         buys = [r for r in results if r["signal"] == "BUY"]
         sells = [r for r in results if r["signal"] == "SELL"]
         holds = [r for r in results if r["signal"] == "HOLD"]
 
-        st.markdown("#### Top Opportunities")
+        # ── BEST STOCK FOR SWING ──
+        st.markdown("---")
+        st.markdown("### 🏆 Best Stock to Buy")
+        best_swing_col, best_scalp_col = st.columns(2)
+
+        with best_swing_col:
+            st.markdown("#### Swing Trading Pick")
+            if buys:
+                best_sw = buys[0]
+                setup = best_sw.get("setup")
+                action_card(
+                    f"BUY: {best_sw['name']}",
+                    f"₹{best_sw['price']:,.2f} | {best_sw['strength']} | {best_sw['confidence']*100:.0f}% conf",
+                    "action-buy",
+                )
+                if setup:
+                    st.markdown(f"""
+| | Price |
+|---|---|
+| **Entry** | ₹{setup.entry_price:,.2f} |
+| **Stop Loss** | ₹{setup.stop_loss:,.2f} |
+| **Target 1** | ₹{setup.target_1:,.2f} (R:R {setup.risk_reward_1}) |
+| **Target 2** | ₹{setup.target_2:,.2f} (R:R {setup.risk_reward_2}) |
+| **Target 3** | ₹{setup.target_3:,.2f} (R:R {setup.risk_reward_3}) |
+""")
+                # Signal reasons
+                reasons = best_sw.get("reasons", [])
+                if reasons:
+                    checklist([(r, not any(w in r.lower() for w in ["bearish", "overbought", "below", "downtrend"])) for r in reasons])
+                # Chart patterns
+                patterns = best_sw.get("patterns", [])
+                if patterns:
+                    for p in patterns:
+                        emoji = "🟢" if "bullish" in p["implication"].lower() or "uptrend" in p["implication"].lower() else "🔴" if "bearish" in p["implication"].lower() or "downtrend" in p["implication"].lower() else "🟡"
+                        st.markdown(f"{emoji} **{p['pattern']}** — {p['implication']} ({p['confidence']*100:.0f}% confidence)")
+            else:
+                st.info("No swing BUY signals found in this scan.")
+
+        # ── BEST STOCK FOR SCALPING ──
+        with best_scalp_col:
+            st.markdown("#### Scalping Pick")
+            scalp_longs = [r for r in scalp_res if r["signal"] == "LONG"]
+            if scalp_longs:
+                best_sc = scalp_longs[0]
+                action_card(
+                    f"LONG: {best_sc['name']}",
+                    f"₹{best_sc['price']:,.2f} | {best_sc['strength']} | {best_sc['confidence']*100:.0f}% conf",
+                    "action-buy",
+                )
+                st.markdown(f"""
+| | Price |
+|---|---|
+| **Entry** | ₹{best_sc['entry']:,.2f} |
+| **Stop Loss** | ₹{best_sc['stop_loss']:,.2f} |
+| **Target 1** | ₹{best_sc['target_1']:,.2f} |
+| **Target 2** | ₹{best_sc['target_2']:,.2f} |
+| **Risk:Reward** | {best_sc['risk_reward']} |
+| **VWAP** | ₹{best_sc['vwap']:,.2f} |
+| **Trend** | {best_sc['trend']} |
+| **Volatility** | {best_sc['volatility']} |
+| **Scalpability** | {best_sc['scalpability']}/100 |
+""")
+                reasons = best_sc.get("reasons", [])
+                if reasons:
+                    checklist([(r, not any(w in r.lower() for w in ["bearish", "overbought", "below", "negative", "downward"])) for r in reasons])
+            else:
+                st.info("No scalping LONG signals found. Market may be closed or bearish.")
+
+        # ── TOP SWING OPPORTUNITIES ──
+        st.markdown("---")
+        st.markdown("#### Top Swing Opportunities")
         if buys:
             top = buys[:3]
             tc = st.columns(len(top))
@@ -933,6 +1044,21 @@ with tab_screener:
         else:
             st.info("No BUY signals found in this scan.")
 
+        # ── TOP SCALPING OPPORTUNITIES ──
+        if scalp_res:
+            scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"]
+            if scalp_longs_all:
+                st.markdown("#### Top Scalping Opportunities")
+                top_sc = scalp_longs_all[:3]
+                sc_top_cols = st.columns(len(top_sc))
+                for i, pick in enumerate(top_sc):
+                    with sc_top_cols[i]:
+                        action_card(
+                            f"LONG: {pick['name']}",
+                            f"₹{pick['price']:,.2f} | {pick['strength']} | Scalp {pick['scalpability']}/100",
+                            "action-buy",
+                        )
+
         if sells:
             st.markdown("#### Stocks to Avoid / Sell")
             sell_top = sells[:3]
@@ -945,8 +1071,8 @@ with tab_screener:
                         "action-sell",
                     )
 
-        # Full results table
-        st.markdown("#### All Scanned Stocks")
+        # ── FULL RESULTS TABLES ──
+        st.markdown("#### All Scanned Stocks — Swing Signals")
         table_rows = []
         for r in results:
             sig_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(r["signal"], "⚪")
@@ -962,7 +1088,30 @@ with tab_screener:
             })
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-        st.markdown(f"**Summary:** {len(buys)} BUY | {len(sells)} SELL | {len(holds)} HOLD out of {len(results)} stocks scanned")
+        if scalp_res:
+            st.markdown("#### All Scanned Stocks — Scalping Signals")
+            scalp_table = []
+            for r in scalp_res:
+                sig_emoji = {"LONG": "🟢", "SHORT": "🔴", "NO_TRADE": "🟡"}.get(r["signal"], "⚪")
+                scalp_table.append({
+                    "Stock": r["name"],
+                    "Price (₹)": f"{r['price']:,.2f}",
+                    "Signal": f"{sig_emoji} {r['signal']}",
+                    "Strength": r["strength"],
+                    "Confidence": f"{r['confidence']*100:.0f}%",
+                    "R:R": f"{r['risk_reward']}",
+                    "Scalpability": f"{r['scalpability']}/100",
+                    "Trend": r["trend"],
+                    "Volatility": r["volatility"],
+                })
+            st.dataframe(pd.DataFrame(scalp_table), use_container_width=True, hide_index=True)
+
+        swing_summary = f"{len(buys)} BUY | {len(sells)} SELL | {len(holds)} HOLD"
+        scalp_longs_count = len([r for r in scalp_res if r["signal"] == "LONG"])
+        scalp_shorts_count = len([r for r in scalp_res if r["signal"] == "SHORT"])
+        scalp_no_count = len([r for r in scalp_res if r["signal"] == "NO_TRADE"])
+        scalp_summary = f"{scalp_longs_count} LONG | {scalp_shorts_count} SHORT | {scalp_no_count} NO_TRADE"
+        st.markdown(f"**Swing:** {swing_summary} out of {len(results)} stocks | **Scalp:** {scalp_summary} out of {len(scalp_res)} stocks")
 
 
 # ========================================================================
