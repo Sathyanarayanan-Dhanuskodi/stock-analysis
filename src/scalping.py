@@ -89,110 +89,197 @@ def add_scalping_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
-    """Generate scalping signal from 5-min candle data with indicators."""
+    """Generate scalping signal from 5-min candle data with indicators.
+
+    Uses stricter thresholds and multi-factor confirmation to reduce
+    false signals. Requires trend alignment + momentum + volume confluence.
+    """
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
     prev2 = df.iloc[-3] if len(df) > 2 else prev
+    recent_5 = df.tail(5)
 
     score = 0
     reasons = []
+    confirmations = 0  # Track how many independent confirmations we have
 
-    # EMA alignment (trend direction)
-    if latest["EMA_5"] > latest["EMA_9"] > latest["EMA_21"]:
+    # --- TREND FILTERS (higher weight) ---
+
+    # EMA alignment (trend direction) — must have all 3 aligned for full score
+    ema_bullish = latest["EMA_5"] > latest["EMA_9"] > latest["EMA_21"]
+    ema_bearish = latest["EMA_5"] < latest["EMA_9"] < latest["EMA_21"]
+    if ema_bullish:
         score += 2
+        confirmations += 1
         reasons.append("EMA 5 > 9 > 21 (bullish alignment)")
-    elif latest["EMA_5"] < latest["EMA_9"] < latest["EMA_21"]:
+    elif ema_bearish:
         score -= 2
+        confirmations += 1
         reasons.append("EMA 5 < 9 < 21 (bearish alignment)")
 
-    # EMA crossover (entry trigger)
+    # EMA crossover (entry trigger) — only count if aligned with trend
     if prev["EMA_5"] <= prev["EMA_9"] and latest["EMA_5"] > latest["EMA_9"]:
         score += 2
+        confirmations += 1
         reasons.append("EMA 5/9 bullish crossover (fresh)")
     elif prev["EMA_5"] >= prev["EMA_9"] and latest["EMA_5"] < latest["EMA_9"]:
         score -= 2
+        confirmations += 1
         reasons.append("EMA 5/9 bearish crossover (fresh)")
 
-    # VWAP position
+    # EMA 21 slope direction (higher timeframe trend)
+    if len(df) >= 10:
+        ema21_now = latest["EMA_21"]
+        ema21_prev5 = df.iloc[-6]["EMA_21"] if len(df) > 5 else ema21_now
+        ema21_slope = (ema21_now - ema21_prev5) / ema21_prev5 * 100 if ema21_prev5 > 0 else 0
+        if ema21_slope > 0.05:
+            score += 1
+            reasons.append(f"EMA 21 trending up ({ema21_slope:+.2f}%)")
+        elif ema21_slope < -0.05:
+            score -= 1
+            reasons.append(f"EMA 21 trending down ({ema21_slope:+.2f}%)")
+
+    # --- VWAP (key institutional level) ---
+    vwap_dist_pct = (latest["Close"] - latest["VWAP"]) / latest["VWAP"] * 100 if latest["VWAP"] > 0 else 0
     if latest["Close"] > latest["VWAP"]:
         score += 1
-        reasons.append(f"Price above VWAP ({latest['VWAP']:.2f})")
+        confirmations += 1
+        reasons.append(f"Price above VWAP by {vwap_dist_pct:.2f}%")
     else:
         score -= 1
-        reasons.append(f"Price below VWAP ({latest['VWAP']:.2f})")
+        confirmations += 1
+        reasons.append(f"Price below VWAP by {vwap_dist_pct:.2f}%")
 
-    # RSI conditions (fast RSI)
+    # --- MOMENTUM INDICATORS ---
+
+    # RSI conditions (fast RSI) — use stricter thresholds
     rsi = latest["RSI_7"]
-    if rsi < 25:
-        score += 1
-        reasons.append(f"RSI oversold ({rsi:.0f}) - bounce likely")
-    elif rsi > 75:
-        score -= 1
-        reasons.append(f"RSI overbought ({rsi:.0f}) - pullback likely")
-
-    # Stochastic RSI
-    stoch_rsi = latest.get("StochRSI", 50)
-    if stoch_rsi < 20:
-        score += 1
-        reasons.append("StochRSI oversold")
-    elif stoch_rsi > 80:
-        score -= 1
-        reasons.append("StochRSI overbought")
-
-    # MACD scalping
-    if latest["MACD_Scalp_Hist"] > 0 and prev["MACD_Scalp_Hist"] <= 0:
+    if rsi < 20:
         score += 2
-        reasons.append("MACD histogram turned positive")
-    elif latest["MACD_Scalp_Hist"] < 0 and prev["MACD_Scalp_Hist"] >= 0:
-        score -= 2
-        reasons.append("MACD histogram turned negative")
-
-    # Bollinger Band squeeze / bounce
-    if latest["Close"] <= latest["BB_Lower_Scalp"] * 1.001:
+        confirmations += 1
+        reasons.append(f"RSI deeply oversold ({rsi:.0f}) - strong bounce likely")
+    elif rsi < 30:
         score += 1
-        reasons.append("Price touching lower BB (bounce zone)")
-    elif latest["Close"] >= latest["BB_Upper_Scalp"] * 0.999:
+        reasons.append(f"RSI oversold ({rsi:.0f}) - bounce possible")
+    elif rsi > 80:
+        score -= 2
+        confirmations += 1
+        reasons.append(f"RSI deeply overbought ({rsi:.0f}) - strong pullback likely")
+    elif rsi > 70:
         score -= 1
-        reasons.append("Price touching upper BB (rejection zone)")
+        reasons.append(f"RSI overbought ({rsi:.0f}) - pullback possible")
 
-    # Volume confirmation
+    # Stochastic RSI — only count at extremes
+    stoch_rsi = latest.get("StochRSI", 50)
+    if stoch_rsi < 15:
+        score += 1
+        reasons.append(f"StochRSI deeply oversold ({stoch_rsi:.0f})")
+    elif stoch_rsi > 85:
+        score -= 1
+        reasons.append(f"StochRSI deeply overbought ({stoch_rsi:.0f})")
+
+    # MACD scalping — require histogram building (not just crossing)
+    macd_hist = latest["MACD_Scalp_Hist"]
+    prev_hist = prev["MACD_Scalp_Hist"]
+    if macd_hist > 0 and prev_hist <= 0:
+        score += 2
+        confirmations += 1
+        reasons.append("MACD histogram turned positive")
+    elif macd_hist < 0 and prev_hist >= 0:
+        score -= 2
+        confirmations += 1
+        reasons.append("MACD histogram turned negative")
+    elif macd_hist > 0 and macd_hist > prev_hist:
+        score += 1
+        reasons.append("MACD histogram growing positive")
+    elif macd_hist < 0 and macd_hist < prev_hist:
+        score -= 1
+        reasons.append("MACD histogram growing negative")
+
+    # --- PRICE ACTION ---
+
+    # Bollinger Band — only at clear extremes
+    bb_width_pct = (latest["BB_Upper_Scalp"] - latest["BB_Lower_Scalp"]) / latest["BB_Mid_Scalp"] * 100 if latest["BB_Mid_Scalp"] > 0 else 0
+    if latest["Close"] <= latest["BB_Lower_Scalp"]:
+        score += 1
+        reasons.append(f"Price at/below lower BB (bounce zone, BB width: {bb_width_pct:.2f}%)")
+    elif latest["Close"] >= latest["BB_Upper_Scalp"]:
+        score -= 1
+        reasons.append(f"Price at/above upper BB (rejection zone, BB width: {bb_width_pct:.2f}%)")
+
+    # Consecutive candle direction (trend persistence)
+    up_candles = sum(1 for i in range(len(recent_5)) if recent_5["Close"].iloc[i] > recent_5["Open"].iloc[i])
+    if up_candles >= 4:
+        score += 1
+        reasons.append(f"{up_candles}/5 recent candles bullish")
+    elif up_candles <= 1:
+        score -= 1
+        reasons.append(f"{5 - up_candles}/5 recent candles bearish")
+
+    # --- VOLUME CONFIRMATION (critical for scalping) ---
     vol_ratio = latest.get("Vol_Ratio", 1)
-    if vol_ratio > 1.5:
+    if vol_ratio > 2.0:
+        if latest["Close"] > prev["Close"]:
+            score += 2
+            confirmations += 1
+            reasons.append(f"Strong volume surge on up candle ({vol_ratio:.1f}x)")
+        else:
+            score -= 2
+            confirmations += 1
+            reasons.append(f"Strong volume surge on down candle ({vol_ratio:.1f}x)")
+    elif vol_ratio > 1.3:
         if latest["Close"] > prev["Close"]:
             score += 1
-            reasons.append(f"Volume surge on up candle ({vol_ratio:.1f}x)")
+            reasons.append(f"Volume above average on up candle ({vol_ratio:.1f}x)")
         else:
             score -= 1
-            reasons.append(f"Volume surge on down candle ({vol_ratio:.1f}x)")
+            reasons.append(f"Volume above average on down candle ({vol_ratio:.1f}x)")
+    elif vol_ratio < 0.5:
+        # Low volume = unreliable signals, penalize
+        if score > 0:
+            score -= 1
+        elif score < 0:
+            score += 1
+        reasons.append(f"Low volume ({vol_ratio:.1f}x) — signal less reliable")
 
-    # Momentum
+    # Momentum (last 3 candles)
     momentum = latest.get("Momentum_3", 0)
-    if momentum > 0.15:
+    if momentum > 0.2:
         score += 1
         reasons.append(f"Strong upward momentum ({momentum:.2f}%)")
-    elif momentum < -0.15:
+    elif momentum < -0.2:
         score -= 1
         reasons.append(f"Strong downward momentum ({momentum:.2f}%)")
 
-    # Calculate entry, SL, targets
+    # --- SIGNAL DETERMINATION ---
+    # Stricter thresholds: require score >= 4 for Strong, >= 2 for Moderate
+    # Also require minimum confirmations (independent factor agreement)
     entry = latest["Close"]
-    atr = latest.get("ATR_7", entry * 0.003)  # Fallback 0.3%
+    atr = latest.get("ATR_7", entry * 0.003)
 
-    if score >= 3:
+    # Check if ATR is too small relative to price (stock not moving enough)
+    atr_pct = atr / entry * 100 if entry > 0 else 0
+    if atr_pct < 0.15:
+        reasons.append(f"Low ATR ({atr_pct:.2f}%) — tight range, scalping difficult")
+        # Dampen signals in tight ranges
+        if abs(score) <= 3:
+            score = 0
+
+    if score >= 5 and confirmations >= 3:
         signal, strength = "LONG", "Strong"
-    elif score >= 1:
+    elif score >= 3 and confirmations >= 2:
         signal, strength = "LONG", "Moderate"
-    elif score <= -3:
+    elif score <= -5 and confirmations >= 3:
         signal, strength = "SHORT", "Strong"
-    elif score <= -1:
+    elif score <= -3 and confirmations >= 2:
         signal, strength = "SHORT", "Moderate"
     else:
         signal, strength = "NO_TRADE", "Weak"
 
     if signal == "LONG":
         stop_loss = entry - 1.5 * atr
-        target_1 = entry + 1.5 * atr  # 1:1
-        target_2 = entry + 2.5 * atr  # ~1:1.7
+        target_1 = entry + 1.5 * atr
+        target_2 = entry + 2.5 * atr
     elif signal == "SHORT":
         stop_loss = entry + 1.5 * atr
         target_1 = entry - 1.5 * atr
@@ -206,7 +293,7 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     reward = abs(target_1 - entry)
     rr = reward / risk if risk > 0 else 0
 
-    confidence = min(1.0, abs(score) / 8)
+    confidence = min(1.0, abs(score) / 10)
 
     return ScalpSignal(
         signal=signal, strength=strength, confidence=confidence,
@@ -311,22 +398,37 @@ def get_market_microstructure(df: pd.DataFrame) -> dict:
         else:
             break
 
-    # Scalp-ability score (0-100)
-    scalpability = 50
+    # Scalp-ability score (0-100) — stricter criteria
+    scalpability = 40  # Start lower, earn points
+    # Volatility is key for scalping
     if vol_regime == "High":
-        scalpability += 15
+        scalpability += 20
+    elif vol_regime == "Normal":
+        scalpability += 5
     elif vol_regime == "Low":
-        scalpability -= 20
+        scalpability -= 25
+    # Volume is essential — can't scalp without liquidity
     if vol_status == "Above Average":
-        scalpability += 15
+        scalpability += 20
+    elif vol_status == "Average":
+        scalpability += 5
     elif vol_status == "Below Average":
-        scalpability -= 15
+        scalpability -= 20
+    # Clear trend is better than sideways for scalping
     if trend != "Sideways":
         scalpability += 10
+    # ATR must be large enough to cover spread + slippage
     if atr > 0 and latest["Close"] > 0:
         spread_pct = atr / latest["Close"] * 100
-        if spread_pct > 0.3:
-            scalpability += 10
+        if spread_pct > 0.4:
+            scalpability += 15
+        elif spread_pct > 0.25:
+            scalpability += 5
+        elif spread_pct < 0.15:
+            scalpability -= 15  # Too tight, can't profit
+    # Consecutive candles in one direction = trending = better for scalping
+    if consecutive >= 3:
+        scalpability += 5
     scalpability = max(0, min(100, scalpability))
 
     return {

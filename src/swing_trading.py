@@ -207,111 +207,215 @@ def calculate_atr_stop_loss(df: pd.DataFrame, atr_period: int = 14, atr_multipli
 
 
 def generate_swing_signals(df: pd.DataFrame) -> SwingSignal:
-    """Multi-condition swing trade signal generator."""
+    """Multi-condition swing trade signal generator with stricter thresholds.
+
+    Requires confluence of trend + momentum + volume for reliable signals.
+    Uses multi-day confirmation and divergence detection.
+    """
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
     prev2 = df.iloc[-3] if len(df) > 2 else prev
+    recent_5 = df.tail(5)
+    recent_10 = df.tail(10)
 
     score = 0
     reasons = []
+    confirmations = 0  # Independent factor count
 
-    # RSI conditions
-    if "RSI" in df.columns:
-        rsi = latest["RSI"]
-        rsi_prev = prev["RSI"]
-        if 30 < rsi < 70 and rsi > rsi_prev:
-            score += 1
-            reasons.append(f"RSI recovering ({rsi:.1f}, rising)")
-        elif rsi > 70:
-            score -= 1
-            reasons.append(f"RSI overbought ({rsi:.1f})")
-        elif rsi < 30:
-            score += 1
-            reasons.append(f"RSI oversold ({rsi:.1f}, potential reversal)")
+    # --- TREND STRUCTURE (most important for swing) ---
 
-    # MACD crossover
-    if "MACD" in df.columns and "MACD_Signal" in df.columns:
-        if latest["MACD"] > latest["MACD_Signal"] and prev["MACD"] <= prev["MACD_Signal"]:
-            score += 2
-            reasons.append("MACD bullish crossover (fresh)")
-        elif latest["MACD"] > latest["MACD_Signal"]:
-            score += 1
-            reasons.append("MACD above signal line")
-        elif latest["MACD"] < latest["MACD_Signal"] and prev["MACD"] >= prev["MACD_Signal"]:
-            score -= 2
-            reasons.append("MACD bearish crossover (fresh)")
-        elif latest["MACD"] < latest["MACD_Signal"]:
-            score -= 1
-            reasons.append("MACD below signal line")
-
-    # Bollinger Band bounces
-    if "BB_Lower" in df.columns and "BB_Upper" in df.columns:
-        if latest["Close"] <= latest["BB_Lower"] * 1.01:
-            score += 1
-            reasons.append("Price at lower Bollinger Band (potential bounce)")
-        elif latest["Close"] >= latest["BB_Upper"] * 0.99:
-            score -= 1
-            reasons.append("Price at upper Bollinger Band (potential rejection)")
-
-    # SMA trend alignment
+    # SMA trend alignment — full stack alignment gets higher weight
     if "SMA_20" in df.columns and "SMA_50" in df.columns:
-        if latest["Close"] > latest["SMA_20"] > latest["SMA_50"]:
+        sma200 = latest.get("SMA_200", latest["SMA_50"])
+        if latest["Close"] > latest["SMA_20"] > latest["SMA_50"] > sma200:
+            score += 2
+            confirmations += 1
+            reasons.append("Full trend alignment: Price > SMA20 > SMA50 > SMA200 (strong uptrend)")
+        elif latest["Close"] > latest["SMA_20"] > latest["SMA_50"]:
             score += 1
+            confirmations += 1
             reasons.append("Price above SMA20 > SMA50 (uptrend)")
         elif latest["Close"] < latest["SMA_20"] < latest["SMA_50"]:
             score -= 1
+            confirmations += 1
             reasons.append("Price below SMA20 < SMA50 (downtrend)")
-
-    # Stochastic crossover
-    if "Stoch_K" in df.columns and "Stoch_D" in df.columns:
-        if latest["Stoch_K"] > latest["Stoch_D"] and prev["Stoch_K"] <= prev["Stoch_D"] and latest["Stoch_K"] < 30:
-            score += 2
-            reasons.append("Stochastic bullish crossover in oversold zone")
-        elif latest["Stoch_K"] < latest["Stoch_D"] and prev["Stoch_K"] >= prev["Stoch_D"] and latest["Stoch_K"] > 70:
+        elif latest["Close"] < latest["SMA_20"] < latest["SMA_50"] < sma200:
             score -= 2
-            reasons.append("Stochastic bearish crossover in overbought zone")
+            confirmations += 1
+            reasons.append("Full trend alignment: Price < SMA20 < SMA50 < SMA200 (strong downtrend)")
 
-    # ADX trend strength
+    # SMA 20 slope over last 5 days (trend direction persistence)
+    if "SMA_20" in df.columns and len(df) >= 5:
+        sma20_slope = (latest["SMA_20"] - df.iloc[-6]["SMA_20"]) / df.iloc[-6]["SMA_20"] * 100
+        if sma20_slope > 0.5:
+            score += 1
+            reasons.append(f"SMA20 rising strongly ({sma20_slope:+.2f}%/5d)")
+        elif sma20_slope < -0.5:
+            score -= 1
+            reasons.append(f"SMA20 falling strongly ({sma20_slope:+.2f}%/5d)")
+
+    # ADX trend strength + DI directional
     if "ADX" in df.columns and "Plus_DI" in df.columns and "Minus_DI" in df.columns:
-        if latest["ADX"] > 25:
+        adx = latest["ADX"]
+        if adx > 25:
             if latest["Plus_DI"] > latest["Minus_DI"]:
-                score += 1
-                reasons.append(f"Strong uptrend (ADX={latest['ADX']:.0f}, +DI > -DI)")
+                score += 2
+                confirmations += 1
+                reasons.append(f"Strong uptrend confirmed (ADX={adx:.0f}, +DI={latest['Plus_DI']:.0f} > -DI={latest['Minus_DI']:.0f})")
             else:
+                score -= 2
+                confirmations += 1
+                reasons.append(f"Strong downtrend confirmed (ADX={adx:.0f}, -DI={latest['Minus_DI']:.0f} > +DI={latest['Plus_DI']:.0f})")
+        elif adx < 15:
+            reasons.append(f"No trend (ADX={adx:.0f}) — ranging market, avoid swings")
+
+    # --- MOMENTUM INDICATORS ---
+
+    # RSI conditions — with trend context
+    if "RSI" in df.columns:
+        rsi = latest["RSI"]
+        rsi_prev = prev["RSI"]
+        # RSI divergence detection (price makes new low but RSI doesn't)
+        if len(df) >= 20:
+            price_min_10 = recent_10["Close"].min()
+            rsi_min_10 = recent_10["RSI"].min()
+            price_min_prev = df.tail(20).head(10)["Close"].min()
+            rsi_min_prev = df.tail(20).head(10)["RSI"].min()
+            if price_min_10 < price_min_prev and rsi_min_10 > rsi_min_prev:
+                score += 2
+                confirmations += 1
+                reasons.append(f"Bullish RSI divergence (price lower low, RSI higher low)")
+            elif price_min_10 > price_min_prev and rsi_min_10 < rsi_min_prev:
                 score -= 1
-                reasons.append(f"Strong downtrend (ADX={latest['ADX']:.0f}, -DI > +DI)")
+                reasons.append(f"Bearish RSI divergence detected")
 
-    # Volume confirmation
+        if rsi < 30 and rsi > rsi_prev:
+            score += 2
+            confirmations += 1
+            reasons.append(f"RSI oversold and turning up ({rsi:.1f}, was {rsi_prev:.1f})")
+        elif rsi < 30:
+            score += 1
+            reasons.append(f"RSI oversold ({rsi:.1f}, potential reversal)")
+        elif rsi > 70 and rsi < rsi_prev:
+            score -= 2
+            confirmations += 1
+            reasons.append(f"RSI overbought and turning down ({rsi:.1f}, was {rsi_prev:.1f})")
+        elif rsi > 70:
+            score -= 1
+            reasons.append(f"RSI overbought ({rsi:.1f})")
+        elif 40 < rsi < 60 and rsi > rsi_prev:
+            score += 1
+            reasons.append(f"RSI in healthy zone and rising ({rsi:.1f})")
+
+    # MACD crossover — fresh crossovers get more weight
+    if "MACD" in df.columns and "MACD_Signal" in df.columns:
+        macd_diff = latest["MACD"] - latest["MACD_Signal"]
+        prev_diff = prev["MACD"] - prev["MACD_Signal"]
+        if macd_diff > 0 and prev_diff <= 0:
+            score += 2
+            confirmations += 1
+            reasons.append("MACD bullish crossover (fresh)")
+        elif macd_diff > 0 and macd_diff > prev_diff:
+            score += 1
+            reasons.append("MACD momentum building (histogram expanding)")
+        elif macd_diff < 0 and prev_diff >= 0:
+            score -= 2
+            confirmations += 1
+            reasons.append("MACD bearish crossover (fresh)")
+        elif macd_diff < 0 and macd_diff < prev_diff:
+            score -= 1
+            reasons.append("MACD bearish momentum building")
+
+    # Stochastic crossover — only in extreme zones
+    if "Stoch_K" in df.columns and "Stoch_D" in df.columns:
+        if latest["Stoch_K"] > latest["Stoch_D"] and prev["Stoch_K"] <= prev["Stoch_D"] and latest["Stoch_K"] < 25:
+            score += 2
+            confirmations += 1
+            reasons.append(f"Stochastic bullish crossover in oversold zone (K={latest['Stoch_K']:.0f})")
+        elif latest["Stoch_K"] < latest["Stoch_D"] and prev["Stoch_K"] >= prev["Stoch_D"] and latest["Stoch_K"] > 75:
+            score -= 2
+            confirmations += 1
+            reasons.append(f"Stochastic bearish crossover in overbought zone (K={latest['Stoch_K']:.0f})")
+
+    # --- PRICE ACTION ---
+
+    # Bollinger Band bounces — require volume confirmation
+    if "BB_Lower" in df.columns and "BB_Upper" in df.columns:
+        if latest["Close"] <= latest["BB_Lower"] * 1.005 and latest["Close"] > prev["Close"]:
+            score += 1
+            reasons.append("Price bouncing off lower Bollinger Band")
+        elif latest["Close"] >= latest["BB_Upper"] * 0.995 and latest["Close"] < prev["Close"]:
+            score -= 1
+            reasons.append("Price rejecting at upper Bollinger Band")
+
+    # Multi-day price action (last 5 days trend)
+    if len(recent_5) >= 5:
+        up_days = sum(1 for i in range(1, len(recent_5)) if recent_5["Close"].iloc[i] > recent_5["Close"].iloc[i-1])
+        if up_days >= 4:
+            score += 1
+            reasons.append(f"{up_days}/4 recent days green — bullish momentum")
+        elif up_days <= 1:
+            score -= 1
+            reasons.append(f"{4 - up_days}/4 recent days red — bearish momentum")
+
+    # --- VOLUME CONFIRMATION ---
     if "Volume_Ratio" in df.columns:
-        if latest["Volume_Ratio"] > 1.5 and latest["Close"] > prev["Close"]:
+        vol_r = latest["Volume_Ratio"]
+        if vol_r > 2.0 and latest["Close"] > prev["Close"]:
+            score += 2
+            confirmations += 1
+            reasons.append(f"Strong volume surge on up day ({vol_r:.1f}x avg) — institutional buying")
+        elif vol_r > 1.5 and latest["Close"] > prev["Close"]:
             score += 1
-            reasons.append(f"Volume surge on up day ({latest['Volume_Ratio']:.1f}x avg)")
-        elif latest["Volume_Ratio"] > 1.5 and latest["Close"] < prev["Close"]:
+            reasons.append(f"Above-average volume on up day ({vol_r:.1f}x)")
+        elif vol_r > 2.0 and latest["Close"] < prev["Close"]:
+            score -= 2
+            confirmations += 1
+            reasons.append(f"Strong volume surge on down day ({vol_r:.1f}x avg) — institutional selling")
+        elif vol_r > 1.5 and latest["Close"] < prev["Close"]:
             score -= 1
-            reasons.append(f"Volume surge on down day ({latest['Volume_Ratio']:.1f}x avg)")
+            reasons.append(f"Above-average volume on down day ({vol_r:.1f}x)")
+        elif vol_r < 0.5:
+            reasons.append(f"Low volume ({vol_r:.1f}x) — moves may not sustain")
 
-    # MFI divergence
+    # MFI (money flow)
     if "MFI" in df.columns:
-        if latest["MFI"] < 20:
+        mfi = latest["MFI"]
+        if mfi < 20:
             score += 1
-            reasons.append(f"MFI oversold ({latest['MFI']:.0f})")
-        elif latest["MFI"] > 80:
+            reasons.append(f"MFI oversold ({mfi:.0f}) — money flowing out, reversal possible")
+        elif mfi > 80:
             score -= 1
-            reasons.append(f"MFI overbought ({latest['MFI']:.0f})")
+            reasons.append(f"MFI overbought ({mfi:.0f}) — excess buying, correction possible")
 
-    # Determine signal
-    if score >= 3:
+    # OBV trend (on-balance volume confirms price trend)
+    if "OBV" in df.columns and "OBV_MA" in df.columns:
+        if latest["OBV"] > latest["OBV_MA"] and latest["Close"] > prev["Close"]:
+            score += 1
+            reasons.append("OBV confirming uptrend (volume supports price rise)")
+        elif latest["OBV"] < latest["OBV_MA"] and latest["Close"] < prev["Close"]:
+            score -= 1
+            reasons.append("OBV confirming downtrend (volume supports price fall)")
+
+    # --- SIGNAL DETERMINATION ---
+    # Stricter: require score >= 4 for Strong BUY, >= 2 for Moderate
+    # Also require minimum confirmations for Strong signals
+    if score >= 5 and confirmations >= 3:
         signal, strength = "BUY", "Strong"
-    elif score >= 1:
+    elif score >= 3 and confirmations >= 2:
         signal, strength = "BUY", "Moderate"
-    elif score <= -3:
+    elif score <= -5 and confirmations >= 3:
         signal, strength = "SELL", "Strong"
-    elif score <= -1:
+    elif score <= -3 and confirmations >= 2:
         signal, strength = "SELL", "Moderate"
+    elif score >= 1:
+        signal, strength = "BUY", "Weak"
+    elif score <= -1:
+        signal, strength = "SELL", "Weak"
     else:
         signal, strength = "HOLD", "Weak"
 
-    max_score = 10  # approximate max possible score
+    max_score = 14  # approximate max possible score
     confidence = min(1.0, abs(score) / max_score)
 
     return SwingSignal(signal=signal, strength=strength, confidence=confidence, reasons=reasons)

@@ -51,12 +51,13 @@ _auto_validate()
 st.markdown("""<style>
     /* === ACTION CARDS === */
     .action-card {
-        padding: 22px; border-radius: 14px; text-align: center;
-        font-size: 20px; font-weight: 700; color: #fff; margin: 12px 0;
-        border: 1px solid rgba(255,255,255,0.1);
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        padding: 28px 24px; border-radius: 14px; text-align: center;
+        font-size: 28px; font-weight: 800; color: #fff; margin: 14px 0;
+        border: 1px solid rgba(255,255,255,0.15);
+        box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+        letter-spacing: 0.3px;
     }
-    .action-card span { display: block; font-size: 13px; font-weight: 400; opacity: 0.85; margin-top: 6px; }
+    .action-card span { display: block; font-size: 16px; font-weight: 500; opacity: 0.9; margin-top: 8px; }
     .action-buy, .action-long, .action-up   { background: linear-gradient(135deg, #059669, #10b981); }
     .action-sell, .action-short, .action-down { background: linear-gradient(135deg, #dc2626, #ef4444); }
     .action-hold, .action-sideways           { background: linear-gradient(135deg, #b45309, #d97706); }
@@ -64,55 +65,56 @@ st.markdown("""<style>
 
     /* === HELP BOX === */
     .help-box {
-        background: rgba(0,212,255,0.05); border-left: 3px solid #00d4ff;
-        padding: 14px 18px; border-radius: 0 10px 10px 0; margin: 10px 0;
-        font-size: 13.5px; color: #c0c0d0; line-height: 1.65;
+        background: rgba(0,212,255,0.05); border-left: 4px solid #00d4ff;
+        padding: 16px 20px; border-radius: 0 10px 10px 0; margin: 12px 0;
+        font-size: 15px; color: #d0d0e0; line-height: 1.7;
     }
-    .help-box b { color: #e8e8f0; }
+    .help-box b { color: #f0f0ff; }
 
     /* === SETUP CARD === */
     .setup-card {
-        background: #1a1a2e; padding: 18px; border-radius: 12px;
+        background: #1a1a2e; padding: 22px; border-radius: 12px;
         border: 1px solid #2a2a40; margin: 8px 0;
-        color: #c8c8d8; line-height: 1.85; font-size: 14.5px;
+        color: #d8d8e8; line-height: 2.0; font-size: 17px;
     }
-    .setup-card b { color: #e8e8f0; }
+    .setup-card b { color: #f0f0ff; font-size: 17px; }
 
     /* === VERDICT BOX === */
     .verdict-box {
-        padding: 14px 18px; border-radius: 10px; margin: 10px 0;
-        font-size: 14px; color: #c8c8d8; line-height: 1.6;
+        padding: 16px 20px; border-radius: 10px; margin: 10px 0;
+        font-size: 16px; color: #d8d8e8; line-height: 1.7;
     }
-    .verdict-box b { color: #e8e8f0; }
-    .good    { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); border-left: 3px solid #10b981; }
-    .bad     { background: rgba(239,68,68,0.1);  border: 1px solid rgba(239,68,68,0.3);  border-left: 3px solid #ef4444; }
-    .neutral { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); border-left: 3px solid #f59e0b; }
+    .verdict-box b { color: #f0f0ff; }
+    .good    { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.35); border-left: 4px solid #10b981; }
+    .bad     { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.35);  border-left: 4px solid #ef4444; }
+    .neutral { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); border-left: 4px solid #f59e0b; }
 
     /* === CHECKLIST === */
     .checklist {
-        background: #1a1a2e; padding: 16px 20px; border-radius: 12px; margin: 10px 0;
-        color: #c8c8d8; line-height: 1.85; font-size: 14px; border: 1px solid #2a2a40;
+        background: #1a1a2e; padding: 18px 22px; border-radius: 12px; margin: 12px 0;
+        color: #d8d8e8; line-height: 2.1; font-size: 16px; border: 1px solid #2a2a40;
     }
-    .checklist b { color: #e8e8f0; }
+    .checklist b { color: #f0f0ff; font-size: 17px; }
 
     /* === METRIC CARDS === */
     [data-testid="stMetric"] {
-        background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 12px; padding: 16px;
+        background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 12px; padding: 18px;
     }
-    [data-testid="stMetricLabel"] { color: #8888a0 !important; font-size: 11px !important; text-transform: uppercase; letter-spacing: 0.5px; }
-    [data-testid="stMetricValue"] { color: #e8e8f0 !important; font-weight: 700 !important; }
+    [data-testid="stMetricLabel"] { color: #9999b0 !important; font-size: 13px !important; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600 !important; }
+    [data-testid="stMetricValue"] { color: #f0f0ff !important; font-weight: 800 !important; font-size: 1.4rem !important; }
 
     /* === TABS === */
     .stTabs [data-baseweb="tab-list"] {
         gap: 4px; background: #1a1a2e; border-radius: 10px; padding: 4px; border: 1px solid #2a2a40;
     }
-    .stTabs [data-baseweb="tab"] { border-radius: 8px; padding: 8px 16px; color: #8888a0; font-weight: 500; }
-    .stTabs [aria-selected="true"] { background: #00d4ff !important; color: #0f0f1e !important; font-weight: 600; }
+    .stTabs [data-baseweb="tab"] { border-radius: 8px; padding: 10px 18px; color: #9999b0; font-weight: 600; font-size: 15px; }
+    .stTabs [aria-selected="true"] { background: #00d4ff !important; color: #0f0f1e !important; font-weight: 700; }
 
     /* === BUTTONS === */
     .stButton > button[kind="primary"] {
         background: #00d4ff !important; color: #0f0f1e !important;
-        border: none !important; border-radius: 8px !important; font-weight: 600 !important;
+        border: none !important; border-radius: 8px !important; font-weight: 700 !important;
+        font-size: 15px !important; padding: 10px 20px !important;
     }
     .stButton > button[kind="primary"]:hover { background: #00bce0 !important; }
 
@@ -123,17 +125,40 @@ st.markdown("""<style>
     .app-title h1 {
         background: linear-gradient(135deg, #00d4ff, #a855f7);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        font-size: 2rem; font-weight: 800; margin: 0;
+        font-size: 2.4rem; font-weight: 800; margin: 0;
     }
-    .app-title p { color: #6b6b80; font-size: 13px; margin: 4px 0 0 0; }
+    .app-title p { color: #8888a0; font-size: 15px; margin: 6px 0 0 0; }
+
+    /* === SCREENER PICK CARD === */
+    .screener-pick {
+        background: #1a1a2e; padding: 20px; border-radius: 12px;
+        border: 1px solid #2a2a40; margin: 8px 0;
+        color: #d8d8e8; line-height: 1.9; font-size: 16px;
+    }
+    .screener-pick b { color: #f0f0ff; }
+    .screener-pick .price { font-size: 22px; font-weight: 800; color: #00d4ff; }
+    .screener-pick .detail { font-size: 15px; color: #b0b0c8; }
+
+    /* === DATAFRAME STYLING === */
+    .stDataFrame { font-size: 14px !important; }
 
     /* === FOOTER === */
     .footer-card {
         background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 10px;
         padding: 14px 18px; margin-top: 20px; text-align: center;
-        font-size: 12px; color: #6b6b80; line-height: 1.5;
+        font-size: 13px; color: #6b6b80; line-height: 1.5;
     }
     .footer-card b { color: #d97706; }
+
+    /* === PROMPT BOX === */
+    .prompt-box {
+        background: #0f0f1e; border: 2px solid #2a2a40; border-radius: 12px;
+        padding: 20px; margin: 12px 0; font-family: monospace;
+        font-size: 13px; color: #d0d0e0; line-height: 1.6;
+        white-space: pre-wrap; word-wrap: break-word;
+        max-height: 400px; overflow-y: auto;
+    }
+    .prompt-box b { color: #00d4ff; }
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -183,18 +208,7 @@ with st.sidebar:
         pivot_method = st.selectbox("Pivot calculation", ["standard", "fibonacci", "camarilla", "woodie"])
 
     st.divider()
-    if is_sentiment_available():
-        st.success("Sentiment Analysis: Enabled")
-    else:
-        st.info("Add ANTHROPIC_API_KEY to .env for sentiment")
-
-# ============================================================
-# TABS
-# ============================================================
-tab_portfolio, tab_screener, tab_chart, tab_predict, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment, tab_accuracy = st.tabs([
-    "💼 Portfolio", "🔍 Screener", "📊 Chart", "🤖 Predictions",
-    "📈 Swing", "⚡ Scalping", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment", "🎯 Accuracy",
-])
+    st.info("Sentiment: Copy-paste prompt mode (no API key needed)")
 
 # ============================================================
 # FETCH DATA
@@ -209,15 +223,52 @@ except Exception as e:
     st.stop()
 
 # ============================================================
-# STOCK BANNER
+# STOCK BANNER — prominent header with stock name + metrics
 # ============================================================
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Current Price", f"₹{info['current_price']:,.2f}")
-col2.metric("Sector", info["sector"])
 price_change = raw_df["Close"].iloc[-1] - raw_df["Close"].iloc[-2]
 pct_change = (price_change / raw_df["Close"].iloc[-2]) * 100
-col3.metric("Day Change", f"₹{price_change:,.2f}", f"{pct_change:+.2f}%")
-col4.metric("Market Cap", f"₹{info['market_cap'] / 1e7:,.0f} Cr" if info["market_cap"] else "N/A")
+change_color = "#10b981" if pct_change >= 0 else "#ef4444"
+change_arrow = "▲" if pct_change >= 0 else "▼"
+mcap_str = f"₹{info['market_cap'] / 1e7:,.0f} Cr" if info["market_cap"] else "N/A"
+
+st.markdown(f"""<div style="
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border: 1px solid #2a2a40; border-radius: 14px;
+    padding: 24px 28px; margin-bottom: 16px;
+">
+    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+        <div>
+            <div style="font-size: 28px; font-weight: 800; color: #f0f0ff; letter-spacing: 0.3px;">
+                {info['name']}
+            </div>
+            <div style="font-size: 15px; color: #8888a0; margin-top: 4px;">
+                {ticker} &bull; {info['sector']}
+            </div>
+        </div>
+        <div style="display: flex; gap: 32px; align-items: center; flex-wrap: wrap;">
+            <div style="text-align: right;">
+                <div style="font-size: 32px; font-weight: 800; color: #00d4ff;">
+                    ₹{info['current_price']:,.2f}
+                </div>
+                <div style="font-size: 17px; font-weight: 600; color: {change_color}; margin-top: 2px;">
+                    {change_arrow} ₹{abs(price_change):,.2f} ({pct_change:+.2f}%)
+                </div>
+            </div>
+            <div style="text-align: right; border-left: 1px solid #2a2a40; padding-left: 24px;">
+                <div style="font-size: 12px; color: #8888a0; text-transform: uppercase; letter-spacing: 0.5px;">Market Cap</div>
+                <div style="font-size: 20px; font-weight: 700; color: #d8d8e8;">{mcap_str}</div>
+            </div>
+        </div>
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ============================================================
+# TABS
+# ============================================================
+tab_portfolio, tab_screener, tab_chart, tab_predict, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment, tab_accuracy = st.tabs([
+    "💼 Portfolio", "🔍 Screener", "📊 Chart", "🤖 Predictions",
+    "📈 Swing", "⚡ Scalping", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment", "🎯 Accuracy",
+])
 
 # ============================================================
 # PLOTLY DEFAULTS
@@ -636,9 +687,18 @@ with tab_scalp:
     help_box("<b>Scalping</b> = ultra-short-term trading on 5-min candles. Buy and sell within minutes/hours. "
              "⚠️ Fast-paced and risky — always use stop losses!")
 
+    # Check if screener has scalp data for this ticker
+    screener_scalp_match = None
+    if "scalp_results" in st.session_state:
+        for sr in st.session_state["scalp_results"]:
+            if sr["ticker"] == ticker:
+                screener_scalp_match = sr
+                break
+
     sc1, sc2 = st.columns([2, 1])
     with sc1:
-        scalp_period = st.selectbox("Data period", ["1d", "2d", "5d"], index=2)
+        scalp_period = st.selectbox("Data period", ["1d", "2d", "5d"], index=2,
+                                     help="Use 5d for consistency with screener results")
     with sc2:
         scalp_btn = st.button("Load Intraday Data", type="primary", use_container_width=True)
 
@@ -648,6 +708,7 @@ with tab_scalp:
                 idf = fetch_intraday_data(ticker, interval="5m", period=scalp_period)
                 idf = add_scalping_indicators(idf)
                 st.session_state["scalp_data"] = idf
+                st.session_state["scalp_data_ticker"] = ticker
             except Exception as e:
                 st.error(f"Error: {e}")
                 st.info("Intraday data only available during market hours (Mon-Fri, 9:15 AM - 3:30 PM IST)")
@@ -663,6 +724,19 @@ with tab_scalp:
         scalp_advice = {"LONG": "Price likely going UP.", "SHORT": "Price likely going DOWN.", "NO_TRADE": "Signals weak — don't trade."}
         action_card(scalp_label.get(ss.signal, "NO TRADE"),
                     f"{ss.strength} | {ss.confidence*100:.0f}% — {scalp_advice.get(ss.signal, '')}", scalp_class.get(ss.signal, "action-notrade"))
+
+        # Show screener consistency check
+        if screener_scalp_match:
+            scr_sig = screener_scalp_match["signal"]
+            if scr_sig == ss.signal:
+                verdict_box(f"Screener agrees: <b>{scr_sig}</b> — signals are consistent.", "good")
+            else:
+                verdict_box(
+                    f"Screener showed <b>{scr_sig}</b> but current data shows <b>{ss.signal}</b>. "
+                    f"Signals changed since screener ran (screener scalpability: {screener_scalp_match['scalpability']}/100). "
+                    f"<b>Trust the latest signal above</b> — it uses fresher data.",
+                    "neutral"
+                )
 
         scalpability = micro["scalpability_score"]
         if scalpability >= 65:
@@ -734,29 +808,84 @@ with tab_scalp:
 # TAB 5: SENTIMENT
 # ========================================================================
 with tab_sentiment:
-    if not is_sentiment_available():
-        st.warning("Sentiment analysis requires an Anthropic API key.")
-        help_box("Add ANTHROPIC_API_KEY to .env to enable AI news analysis.")
-    else:
-        help_box("AI reads recent news and determines if sentiment is <b>bullish</b>, <b>bearish</b>, or <b>neutral</b>.")
-        if st.button("Analyze News", type="primary"):
-            with st.spinner("Analyzing..."):
-                news = get_stock_news(ticker)
-                if not news:
-                    st.info("No recent news found.")
-                else:
-                    sentiment = analyze_sentiment(news)
-                    if sentiment:
-                        sc = {"Bullish": "action-up", "Bearish": "action-down", "Neutral": "action-sideways"}
-                        action_card(f"Sentiment: {sentiment['overall']}", f"Score: {sentiment['score']:+.2f}",
-                                    sc.get(sentiment["overall"], "action-sideways"))
-                        st.markdown(f"**Summary:** {sentiment['summary']}")
-                        for d in sentiment["details"]:
-                            ds = "good" if d["sentiment"] == "Bullish" else "bad" if d["sentiment"] == "Bearish" else "neutral"
-                            de = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}.get(d["sentiment"], "⚪")
-                            verdict_box(f"{de} <b>{d['sentiment']}</b> — {d['headline']}", ds)
-                    else:
-                        st.error("Could not analyze sentiment.")
+    help_box("Get AI-powered sentiment analysis for this stock. <b>Step 1:</b> Fetch news & generate a prompt. "
+             "<b>Step 2:</b> Copy the prompt and paste it into ChatGPT or Claude. "
+             "<b>Step 3:</b> Paste the AI's response back here to see the analysis.")
+
+    sent_col1, sent_col2 = st.columns([1, 1])
+    with sent_col1:
+        fetch_news_btn = st.button("Step 1: Fetch News & Generate Prompt", type="primary", use_container_width=True)
+    with sent_col2:
+        clear_sent = st.button("Clear", use_container_width=True)
+
+    if clear_sent:
+        for k in ["sentiment_prompt", "sentiment_news", "sentiment_result"]:
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    if fetch_news_btn:
+        with st.spinner("Fetching news..."):
+            news = get_stock_news(ticker)
+        if not news:
+            st.warning("No recent news found for this stock. Try a different stock.")
+        else:
+            st.session_state["sentiment_news"] = news
+            headlines = "\n".join(
+                f"- {item['title']} (Source: {item['publisher']})"
+                for item in news if item.get("title")
+            )
+            stock_name = info.get("name", ticker)
+            prompt = f"""Analyze the sentiment of these stock news headlines for {stock_name} ({ticker}), an Indian stock market company.
+
+Rate the overall sentiment and each headline individually.
+
+Headlines:
+{headlines}
+
+Respond in this EXACT format (no markdown, no extra text):
+OVERALL: [Bullish/Bearish/Neutral]
+SCORE: [float from -1.0 to 1.0]
+SUMMARY: [1-2 sentence analysis]
+DETAILS:
+- [headline]: [Bullish/Bearish/Neutral]"""
+            st.session_state["sentiment_prompt"] = prompt
+
+    if "sentiment_prompt" in st.session_state:
+        st.markdown("#### Copy this prompt and paste it in ChatGPT or Claude:")
+        st.markdown(f"<div class='prompt-box'>{st.session_state['sentiment_prompt']}</div>", unsafe_allow_html=True)
+        st.code(st.session_state["sentiment_prompt"], language=None)
+
+        st.markdown("---")
+        st.markdown("#### Step 2: Paste the AI response below:")
+        ai_response = st.text_area(
+            "Paste AI response here",
+            height=200,
+            placeholder="OVERALL: Bullish\nSCORE: 0.6\nSUMMARY: ...\nDETAILS:\n- headline: Bullish\n...",
+            key="sentiment_response_input",
+        )
+
+        if st.button("Step 3: Analyze Response", type="primary", use_container_width=True):
+            if ai_response.strip():
+                from src.sentiment import _parse_sentiment_response
+                news = st.session_state.get("sentiment_news", [])
+                sentiment = _parse_sentiment_response(ai_response.strip(), news)
+                st.session_state["sentiment_result"] = sentiment
+            else:
+                st.warning("Please paste the AI response first.")
+
+    if "sentiment_result" in st.session_state:
+        sentiment = st.session_state["sentiment_result"]
+        st.markdown("---")
+        st.markdown("#### Sentiment Analysis Result")
+        sc = {"Bullish": "action-up", "Bearish": "action-down", "Neutral": "action-sideways"}
+        action_card(f"Sentiment: {sentiment['overall']}", f"Score: {sentiment['score']:+.2f}",
+                    sc.get(sentiment["overall"], "action-sideways"))
+        if sentiment.get("summary"):
+            verdict_box(f"<b>Summary:</b> {sentiment['summary']}", "good" if sentiment["overall"] == "Bullish" else "bad" if sentiment["overall"] == "Bearish" else "neutral")
+        for d in sentiment.get("details", []):
+            ds = "good" if d["sentiment"] == "Bullish" else "bad" if d["sentiment"] == "Bearish" else "neutral"
+            de = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}.get(d["sentiment"], "⚪")
+            verdict_box(f"{de} <b>{d['sentiment']}</b> — {d['headline']}", ds)
 
 
 # ========================================================================
@@ -865,8 +994,9 @@ with tab_portfolio:
 # TAB 7: SCREENER
 # ========================================================================
 with tab_screener:
-    help_box("<b>Stock Screener</b> scans multiple stocks for both <b>swing trading</b> and <b>scalping</b> opportunities. "
-             "It checks RSI, MACD, ADX, moving averages, VWAP, EMAs, and more to find the best stock to buy for each strategy.")
+    help_box("<b>Stock Screener</b> scans multiple stocks using a <b>multi-factor approach</b> inspired by BlackRock's SAE methodology. "
+             "It combines <b>Technical Signals</b> (RSI, MACD, ADX, EMAs) with <b>Fundamental Momentum</b> (earnings growth, volume trends) "
+             "to find the best stocks for swing trading and scalping.")
 
     scr_c1, scr_c2 = st.columns([2, 1])
     with scr_c1:
@@ -896,6 +1026,50 @@ with tab_screener:
                     t_latest = t_df.iloc[-1]
                     t_setup = calculate_trade_setup(t_df, t_signal)
                     t_patterns = identify_swing_patterns(t_df)
+                    # Multi-factor composite score (inspired by BlackRock SAE)
+                    # Factor 1: Technical signal strength (40%)
+                    tech_score = t_signal.confidence
+
+                    # Factor 2: Momentum (20%) — price above key MAs + positive ROC
+                    momentum_score = 0
+                    if t_latest["Close"] > t_latest.get("SMA_20", t_latest["Close"]):
+                        momentum_score += 0.25
+                    if t_latest["Close"] > t_latest.get("SMA_50", t_latest["Close"]):
+                        momentum_score += 0.25
+                    if t_latest["Close"] > t_latest.get("SMA_200", t_latest["Close"]):
+                        momentum_score += 0.25
+                    roc = t_latest.get("ROC", 0)
+                    if roc > 0:
+                        momentum_score += min(0.25, roc / 20)
+
+                    # Factor 3: Quality (20%) — healthy RSI, strong ADX, volume confirmation
+                    quality_score = 0
+                    rsi_val = t_latest.get("RSI", 50)
+                    if 40 < rsi_val < 65:
+                        quality_score += 0.4  # Healthy RSI zone
+                    elif 30 < rsi_val <= 40:
+                        quality_score += 0.3  # Oversold recovery zone
+                    if t_latest.get("ADX", 0) > 25:
+                        quality_score += 0.3  # Strong trend
+                    if t_latest.get("Volume_Ratio", 1) > 1.0:
+                        quality_score += 0.3  # Active volume
+
+                    # Factor 4: Sentiment/Price Action (20%) — patterns + BB position
+                    sentiment_score = 0
+                    if t_patterns:
+                        bullish_patterns = sum(1 for p in t_patterns if "bullish" in p["implication"].lower())
+                        sentiment_score += min(0.5, bullish_patterns * 0.25)
+                    # Price in lower half of BB = more upside potential
+                    if "BB_Upper" in t_df.columns and "BB_Lower" in t_df.columns:
+                        bb_range = t_latest["BB_Upper"] - t_latest["BB_Lower"]
+                        if bb_range > 0:
+                            bb_position = (t_latest["Close"] - t_latest["BB_Lower"]) / bb_range
+                            if bb_position < 0.4:
+                                sentiment_score += 0.5
+
+                    composite = (0.4 * tech_score + 0.2 * momentum_score +
+                                 0.2 * quality_score + 0.2 * sentiment_score)
+
                     scan_results.append({
                         "ticker": t,
                         "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -903,6 +1077,7 @@ with tab_screener:
                         "signal": t_signal.signal,
                         "strength": t_signal.strength,
                         "confidence": t_signal.confidence,
+                        "composite_score": round(composite, 3),
                         "reasons": t_signal.reasons,
                         "rsi": t_latest.get("RSI", 0),
                         "macd": t_latest.get("MACD", 0),
@@ -944,8 +1119,13 @@ with tab_screener:
                 except Exception:
                     pass
 
-            scan_results.sort(key=lambda x: x["confidence"], reverse=True)
-            scalp_results.sort(key=lambda x: x["confidence"], reverse=True)
+            scan_results.sort(key=lambda x: x["composite_score"], reverse=True)
+            # Sort scalp results by combined score: scalpability (weight 0.6) + confidence (weight 0.4)
+            # This ensures high-scalpability stocks rank higher than just high-confidence ones
+            scalp_results.sort(
+                key=lambda x: 0.6 * (x["scalpability"] / 100) + 0.4 * x["confidence"],
+                reverse=True,
+            )
             progress.progress(1.0, text="Scan complete!")
 
         st.session_state["scan_results"] = scan_results
@@ -972,7 +1152,7 @@ with tab_screener:
                 setup = best_sw.get("setup")
                 action_card(
                     f"BUY: {best_sw['name']}",
-                    f"₹{best_sw['price']:,.2f} | {best_sw['strength']} | {best_sw['confidence']*100:.0f}% conf",
+                    f"₹{best_sw['price']:,.2f} | {best_sw['strength']} | Score: {best_sw.get('composite_score', 0)*100:.0f}%",
                     "action-buy",
                 )
                 if setup:
@@ -1073,6 +1253,8 @@ with tab_screener:
 
         # ── FULL RESULTS TABLES ──
         st.markdown("#### All Scanned Stocks — Swing Signals")
+        help_box("<b>Score</b> = Multi-factor composite (Technical 40% + Momentum 20% + Quality 20% + Sentiment 20%). "
+                 "Inspired by BlackRock's SAE methodology.")
         table_rows = []
         for r in results:
             sig_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(r["signal"], "⚪")
@@ -1081,7 +1263,7 @@ with tab_screener:
                 "Price (₹)": f"{r['price']:,.2f}",
                 "Signal": f"{sig_emoji} {r['signal']}",
                 "Strength": r["strength"],
-                "Confidence": f"{r['confidence']*100:.0f}%",
+                "Score": f"{r.get('composite_score', 0)*100:.0f}%",
                 "RSI": f"{r['rsi']:.0f}",
                 "ADX": f"{r['adx']:.0f}",
                 "Vol Ratio": f"{r['volume_ratio']:.1f}x",

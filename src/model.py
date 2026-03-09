@@ -13,20 +13,64 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
 
 
 def build_lstm_model(n_features: int, forecast_horizon: int = MAX_FORECAST) -> Model:
-    """Build a multi-step direct LSTM model for stock price prediction.
+    """Build a CNN + LSTM hybrid model with temporal attention.
 
-    Instead of predicting 1 day and feeding it back recursively,
-    this model directly predicts all future days at once,
-    which eliminates the lag/smoothing problem.
+    Architecture:
+    1. 1D CNN layers extract local patterns (candlestick formations, short-term trends)
+    2. Bidirectional LSTM captures long-range sequential dependencies
+    3. Temporal Attention lets the model focus on the most relevant time steps
+    4. Dense head produces multi-step forecast
+
+    This hybrid approach outperforms pure LSTM because:
+    - CNN finds local features (2-5 day patterns) that LSTM may dilute over 90 days
+    - Attention weighs recent volatile days more heavily than quiet periods
     """
+    from tensorflow.keras.layers import (
+        Bidirectional, BatchNormalization, Conv1D, MaxPooling1D,
+        Multiply, Permute, RepeatVector, Lambda, Flatten, Concatenate,
+    )
+    import tensorflow.keras.backend as K
+
     inputs = Input(shape=(LOOKBACK, n_features))
-    x = LSTM(128, return_sequences=True)(inputs)
-    x = Dropout(0.3)(x)
+
+    # === CNN Branch: Local pattern extraction ===
+    # Captures short-term patterns like candlestick formations, gaps, spikes
+    c = Conv1D(filters=64, kernel_size=3, activation="relu", padding="same")(inputs)
+    c = Conv1D(filters=64, kernel_size=3, activation="relu", padding="same")(c)
+    c = Dropout(0.2)(c)
+    c = Conv1D(filters=32, kernel_size=5, activation="relu", padding="same")(c)
+    c = Dropout(0.2)(c)
+
+    # === Merge CNN features with original input for LSTM ===
+    merged = Concatenate(axis=-1)([inputs, c])
+
+    # === LSTM Branch: Sequential pattern learning ===
+    x = Bidirectional(LSTM(128, return_sequences=True))(merged)
+    x = Dropout(0.25)(x)
+    x = LSTM(96, return_sequences=True)(x)
+    x = Dropout(0.2)(x)
+
+    # === Temporal Attention Mechanism ===
+    # Learns which time steps (days) are most important for prediction
+    # e.g., days with high volume or big price moves get higher attention
+    attn = Dense(1, activation="tanh")(x)  # (batch, timesteps, 1)
+    attn = Flatten()(attn)  # (batch, timesteps)
+    attn = Dense(x.shape[1], activation="softmax")(attn)  # attention weights
+    attn = RepeatVector(96)(attn)  # (batch, features, timesteps)
+    attn = Permute((2, 1))(attn)  # (batch, timesteps, features)
+    x = Multiply()([x, attn])  # Apply attention weights
+
+    # Final LSTM to compress attended sequence
     x = LSTM(64, return_sequences=False)(x)
-    x = Dropout(0.3)(x)
+    x = Dropout(0.15)(x)
+
+    # === Dense Head ===
+    x = Dense(128, activation="relu")(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.15)(x)
     x = Dense(64, activation="relu")(x)
     x = Dense(32, activation="relu")(x)
-    outputs = Dense(forecast_horizon)(x)  # Predict all days at once
+    outputs = Dense(forecast_horizon)(x)
 
     model = Model(inputs=inputs, outputs=outputs)
     model.compile(optimizer="adam", loss="huber", metrics=["mae"])

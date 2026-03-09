@@ -9,14 +9,16 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
 
 XGB_PARAMS = {
     "objective": "reg:squarederror",
-    "n_estimators": 500,
-    "max_depth": 6,
-    "learning_rate": 0.05,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 3,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
+    "n_estimators": 800,
+    "max_depth": 7,
+    "learning_rate": 0.03,
+    "subsample": 0.75,
+    "colsample_bytree": 0.75,
+    "colsample_bylevel": 0.8,
+    "min_child_weight": 5,
+    "reg_alpha": 0.3,
+    "reg_lambda": 1.5,
+    "gamma": 0.1,
     "tree_method": "hist",
 }
 

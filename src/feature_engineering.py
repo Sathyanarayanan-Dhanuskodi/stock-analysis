@@ -111,13 +111,27 @@ def add_lagged_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add lagged features for XGBoost (which has no sequential memory)."""
     df = df.copy()
 
-    for lag in [1, 3, 5, 10]:
+    for lag in [1, 2, 3, 5, 10, 20]:
         df[f"Close_Lag_{lag}"] = df["Close"].shift(lag)
         df[f"Returns_Lag_{lag}"] = df["Returns"].shift(lag)
 
-    for lag in [1, 3]:
+    for lag in [1, 3, 5]:
         df[f"RSI_Lag_{lag}"] = df["RSI"].shift(lag)
         df[f"Volume_Ratio_Lag_{lag}"] = df["Volume_Ratio"].shift(lag)
+
+    # Price change ratios (how far from recent highs/lows)
+    df["Close_to_High_5"] = df["Close"] / df["High"].rolling(5).max()
+    df["Close_to_Low_5"] = df["Close"] / df["Low"].rolling(5).min()
+    df["Close_to_High_20"] = df["Close"] / df["High"].rolling(20).max()
+    df["Close_to_Low_20"] = df["Close"] / df["Low"].rolling(20).min()
+
+    # Rolling volatility
+    df["Volatility_5"] = df["Returns"].rolling(5).std()
+    df["Volatility_20"] = df["Returns"].rolling(20).std()
+
+    # Price momentum over different windows
+    df["Momentum_5"] = df["Close"].pct_change(5)
+    df["Momentum_20"] = df["Close"].pct_change(20)
 
     df.dropna(inplace=True)
     return df
@@ -205,13 +219,19 @@ def get_feature_columns_with_context() -> list[str]:
 
 
 def get_xgboost_feature_columns() -> list[str]:
-    """Extended feature columns for XGBoost including lags."""
+    """Extended feature columns for XGBoost including lags and derived features."""
     base = get_feature_columns()
     lags = []
-    for lag in [1, 3, 5, 10]:
+    for lag in [1, 2, 3, 5, 10, 20]:
         lags.append(f"Close_Lag_{lag}")
         lags.append(f"Returns_Lag_{lag}")
-    for lag in [1, 3]:
+    for lag in [1, 3, 5]:
         lags.append(f"RSI_Lag_{lag}")
         lags.append(f"Volume_Ratio_Lag_{lag}")
-    return base + lags
+    derived = [
+        "Close_to_High_5", "Close_to_Low_5",
+        "Close_to_High_20", "Close_to_Low_20",
+        "Volatility_5", "Volatility_20",
+        "Momentum_5", "Momentum_20",
+    ]
+    return base + lags + derived
