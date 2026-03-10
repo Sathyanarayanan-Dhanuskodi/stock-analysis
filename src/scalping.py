@@ -88,16 +88,153 @@ def add_scalping_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _find_best_price(df: pd.DataFrame, lookback: int = 24) -> dict:
+    """Find the best actionable entry/exit prices from recent price action.
+
+    Adapts strategy based on market condition:
+    - Trending: use pullback levels (EMA, VWAP) for entry, momentum for exit
+    - Ranging: use swing support/resistance for entry/exit
+    - Always considers multiple price sources and picks the best one
+
+    lookback=24 candles on 5-min = ~2 hours of recent data.
+    """
+    recent = df.tail(lookback)
+    highs = recent["High"].values
+    lows = recent["Low"].values
+    closes = recent["Close"].values
+    current_price = closes[-1]
+
+    # --- 1. Swing highs/lows (S/R levels) ---
+    swing_lows = []
+    for i in range(1, len(lows) - 1):
+        if lows[i] <= lows[i - 1] and lows[i] <= lows[i + 1]:
+            swing_lows.append(lows[i])
+    swing_highs = []
+    for i in range(1, len(highs) - 1):
+        if highs[i] >= highs[i - 1] and highs[i] >= highs[i + 1]:
+            swing_highs.append(highs[i])
+
+    if not swing_lows:
+        swing_lows = [recent["Low"].min()]
+    if not swing_highs:
+        swing_highs = [recent["High"].max()]
+
+    supports_below = [s for s in swing_lows if s <= current_price]
+    nearest_support = max(supports_below) if supports_below else min(swing_lows)
+    resistances_above = [r for r in swing_highs if r >= current_price]
+    nearest_resistance = min(resistances_above) if resistances_above else max(swing_highs)
+
+    # --- 2. Detect market condition: trending vs ranging ---
+    ema5 = recent["EMA_5"].values if "EMA_5" in recent.columns else None
+    ema9 = recent["EMA_9"].values if "EMA_9" in recent.columns else None
+    vwap = recent["VWAP"].values[-1] if "VWAP" in recent.columns else current_price
+    bb_lower = recent["BB_Lower_Scalp"].values[-1] if "BB_Lower_Scalp" in recent.columns else None
+    bb_upper = recent["BB_Upper_Scalp"].values[-1] if "BB_Upper_Scalp" in recent.columns else None
+
+    is_trending_up = False
+    is_trending_down = False
+    if ema5 is not None and len(ema5) >= 5:
+        slope = (ema5[-1] - ema5[-5]) / ema5[-5] * 100 if ema5[-5] > 0 else 0
+        if slope > 0.1:
+            is_trending_up = True
+        elif slope < -0.1:
+            is_trending_down = True
+
+    # --- 3. Build candidate prices from multiple sources ---
+    # Each candidate: (price, source_label)
+    buy_candidates = []
+    sell_candidates = []
+
+    # S/R levels
+    buy_candidates.append((nearest_support, "recent support"))
+    sell_candidates.append((nearest_resistance, "recent resistance"))
+
+    # VWAP — institutional magnet level
+    if vwap < current_price:
+        buy_candidates.append((vwap, "VWAP"))
+    elif vwap > current_price:
+        sell_candidates.append((vwap, "VWAP"))
+
+    # Bollinger Bands — mean reversion zones
+    if bb_lower is not None and bb_lower < current_price:
+        buy_candidates.append((bb_lower, "lower Bollinger Band"))
+    if bb_upper is not None and bb_upper > current_price:
+        sell_candidates.append((bb_upper, "upper Bollinger Band"))
+
+    # EMA pullback — in a trend, price often pulls back to the fast EMA
+    if ema5 is not None:
+        ema5_now = ema5[-1]
+        if is_trending_up and ema5_now < current_price:
+            buy_candidates.append((ema5_now, "EMA5 pullback"))
+        elif is_trending_down and ema5_now > current_price:
+            sell_candidates.append((ema5_now, "EMA5 pullback"))
+    if ema9 is not None:
+        ema9_now = ema9[-1]
+        if is_trending_up and ema9_now < current_price:
+            buy_candidates.append((ema9_now, "EMA9 pullback"))
+        elif is_trending_down and ema9_now > current_price:
+            sell_candidates.append((ema9_now, "EMA9 pullback"))
+
+    # Recent candle low/high — immediate action levels
+    last_3_low = recent["Low"].iloc[-3:].min()
+    last_3_high = recent["High"].iloc[-3:].max()
+    if last_3_low < current_price:
+        buy_candidates.append((last_3_low, "last 3-candle low"))
+    if last_3_high > current_price:
+        sell_candidates.append((last_3_high, "last 3-candle high"))
+
+    # --- 4. Pick the BEST price based on market condition ---
+    atr = recent["ATR_7"].values[-1] if "ATR_7" in recent.columns else current_price * 0.003
+
+    if is_trending_up:
+        # In uptrend: best buy = highest candidate (shallowest pullback, most realistic)
+        # best sell = highest candidate (ride the trend)
+        buy_candidates.sort(key=lambda x: x[0], reverse=True)
+        sell_candidates.sort(key=lambda x: x[0], reverse=True)
+    elif is_trending_down:
+        # In downtrend: best sell = lowest candidate (shallowest pullback)
+        # best buy = lowest candidate (deepest support)
+        buy_candidates.sort(key=lambda x: x[0])
+        sell_candidates.sort(key=lambda x: x[0])
+    else:
+        # Ranging: best buy = nearest support (highest below price)
+        # best sell = nearest resistance (lowest above price)
+        buy_candidates.sort(key=lambda x: x[0], reverse=True)
+        sell_candidates.sort(key=lambda x: x[0])
+
+    # Filter out candidates that are too far (> 2x ATR from current price)
+    buy_candidates = [(p, s) for p, s in buy_candidates if abs(current_price - p) <= 2 * atr]
+    sell_candidates = [(p, s) for p, s in sell_candidates if abs(p - current_price) <= 2 * atr]
+
+    best_buy = buy_candidates[0] if buy_candidates else (current_price, "current price")
+    best_sell = sell_candidates[0] if sell_candidates else (current_price + atr, "ATR projection")
+
+    condition = "uptrend" if is_trending_up else "downtrend" if is_trending_down else "ranging"
+
+    return {
+        "best_buy_price": best_buy[0],
+        "best_buy_source": best_buy[1],
+        "best_sell_price": best_sell[0],
+        "best_sell_source": best_sell[1],
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
+        "condition": condition,
+        "atr": atr,
+    }
+
+
 def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     """Generate scalping signal from 5-min candle data with indicators.
 
-    Uses stricter thresholds and multi-factor confirmation to reduce
-    false signals. Requires trend alignment + momentum + volume confluence.
+    Uses recent price action (last ~2 hours) for entry/exit levels,
+    combined with multi-factor confirmation to reduce false signals.
     """
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
-    prev2 = df.iloc[-3] if len(df) > 2 else prev
     recent_5 = df.tail(5)
+
+    # Find best actionable prices from last 2 hours of price action
+    best_prices = _find_best_price(df, lookback=24)
 
     score = 0
     reasons = []
@@ -254,11 +391,11 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     # --- SIGNAL DETERMINATION ---
     # Stricter thresholds: require score >= 4 for Strong, >= 2 for Moderate
     # Also require minimum confirmations (independent factor agreement)
-    entry = latest["Close"]
-    atr = latest.get("ATR_7", entry * 0.003)
+    current_price = latest["Close"]
+    atr = latest.get("ATR_7", current_price * 0.003)
 
     # Check if ATR is too small relative to price (stock not moving enough)
-    atr_pct = atr / entry * 100 if entry > 0 else 0
+    atr_pct = atr / current_price * 100 if current_price > 0 else 0
     if atr_pct < 0.15:
         reasons.append(f"Low ATR ({atr_pct:.2f}%) — tight range, scalping difficult")
         # Dampen signals in tight ranges
@@ -276,18 +413,34 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     else:
         signal, strength = "NO_TRADE", "Weak"
 
+    # Use the best actionable price from multiple sources (S/R, VWAP, EMA, BB).
+    # Adapts based on market condition: trending uses pullbacks, ranging uses S/R.
+    buy_price = best_prices["best_buy_price"]
+    buy_source = best_prices["best_buy_source"]
+    sell_price = best_prices["best_sell_price"]
+    sell_source = best_prices["best_sell_source"]
+    support = best_prices["nearest_support"]
+    resistance = best_prices["nearest_resistance"]
+    condition = best_prices["condition"]
+
     if signal == "LONG":
-        stop_loss = entry - 1.5 * atr
-        target_1 = entry + 1.5 * atr
-        target_2 = entry + 2.5 * atr
+        entry = buy_price
+        target_1 = sell_price
+        # Extend target_2 beyond target_1
+        target_2 = target_1 + atr
+        stop_loss = entry - atr
+        reasons.append(f"Buy at {buy_source} ({buy_price:.2f}), sell at {sell_source} ({sell_price:.2f}) [{condition}]")
     elif signal == "SHORT":
-        stop_loss = entry + 1.5 * atr
-        target_1 = entry - 1.5 * atr
-        target_2 = entry - 2.5 * atr
+        entry = sell_price
+        target_1 = buy_price
+        target_2 = target_1 - atr
+        stop_loss = entry + atr
+        reasons.append(f"Sell at {sell_source} ({sell_price:.2f}), cover at {buy_source} ({buy_price:.2f}) [{condition}]")
     else:
-        stop_loss = entry - 1.5 * atr
-        target_1 = entry + 1.5 * atr
-        target_2 = entry + 2.5 * atr
+        entry = current_price
+        stop_loss = current_price - 1.5 * atr
+        target_1 = current_price + 1.5 * atr
+        target_2 = current_price + 2.5 * atr
 
     risk = abs(entry - stop_loss)
     reward = abs(target_1 - entry)

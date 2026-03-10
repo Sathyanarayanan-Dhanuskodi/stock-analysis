@@ -1,6 +1,23 @@
 import yfinance as yf
 import pandas as pd
+import streamlit as st
+import time
 from datetime import datetime, timedelta
+
+
+def _yf_retry(func, max_retries=3):
+    """Retry a yfinance call with exponential backoff on rate limits."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+            raise
+    raise RuntimeError("Max retries exceeded")
 
 
 POPULAR_INDIAN_STOCKS = {
@@ -55,13 +72,14 @@ SECTOR_STOCKS = {
 }
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
     """Fetch historical OHLCV data for a given stock ticker."""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_years * 365)
 
     stock = yf.Ticker(ticker)
-    df = stock.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"))
+    df = _yf_retry(lambda: stock.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d")))
 
     if df.empty:
         raise ValueError(f"No data found for ticker '{ticker}'. Check the ticker symbol.")
@@ -74,6 +92,7 @@ def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
     """Fetch Nifty 50 and India VIX data for market context features."""
     end_date = datetime.now()
@@ -85,7 +104,7 @@ def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
 
     # Fetch Nifty 50
     try:
-        nifty = yf.Ticker("^NSEI").history(start=start_str, end=end_str)
+        nifty = _yf_retry(lambda: yf.Ticker("^NSEI").history(start=start_str, end=end_str))
         if not nifty.empty:
             nifty.index = pd.to_datetime(nifty.index).tz_localize(None)
             result["Nifty_Close"] = nifty["Close"]
@@ -95,7 +114,7 @@ def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
 
     # Fetch India VIX
     try:
-        vix = yf.Ticker("^INDIAVIX").history(start=start_str, end=end_str)
+        vix = _yf_retry(lambda: yf.Ticker("^INDIAVIX").history(start=start_str, end=end_str))
         if not vix.empty:
             vix.index = pd.to_datetime(vix.index).tz_localize(None)
             result["VIX_Close"] = vix["Close"]
@@ -110,17 +129,22 @@ def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
     return result
 
 
-def fetch_multiple_stocks(tickers: list[str], period_years: int = 2) -> pd.DataFrame:
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.DataFrame:
     """Fetch Close prices for multiple tickers, aligned on common dates."""
+    if isinstance(tickers, list):
+        tickers = tuple(tickers)
     end_date = datetime.now()
     start_date = end_date - timedelta(days=period_years * 365)
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
     prices = pd.DataFrame()
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers):
         try:
-            df = yf.Ticker(ticker).history(start=start_str, end=end_str)
+            if i > 0:
+                time.sleep(0.5)
+            df = _yf_retry(lambda t=ticker: yf.Ticker(t).history(start=start_str, end=end_str))
             if not df.empty:
                 df.index = pd.to_datetime(df.index).tz_localize(None)
                 prices[ticker] = df["Close"]
@@ -134,10 +158,11 @@ def fetch_multiple_stocks(tickers: list[str], period_years: int = 2) -> pd.DataF
     return prices
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def get_stock_info(ticker: str) -> dict:
     """Get basic stock information."""
     stock = yf.Ticker(ticker)
-    info = stock.info
+    info = _yf_retry(lambda: stock.info)
     return {
         "name": info.get("longName", ticker),
         "sector": info.get("sector", "N/A"),
@@ -148,10 +173,11 @@ def get_stock_info(ticker: str) -> dict:
     }
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def get_stock_news(ticker: str) -> list[dict]:
     """Get recent news for a stock ticker."""
     stock = yf.Ticker(ticker)
-    news = stock.news or []
+    news = _yf_retry(lambda: stock.news) or []
     results = []
     for item in news[:10]:
         results.append({
@@ -163,6 +189,7 @@ def get_stock_news(ticker: str) -> list[dict]:
     return results
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
     """Fetch intraday OHLCV data for scalping analysis.
 
@@ -172,7 +199,7 @@ def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d") -
         period: How far back - "1d", "5d", "1mo" (yfinance limits: 1m=7d, 5m=60d, 15m=60d)
     """
     stock = yf.Ticker(ticker)
-    df = stock.history(interval=interval, period=period)
+    df = _yf_retry(lambda: stock.history(interval=interval, period=period))
 
     if df.empty:
         raise ValueError(f"No intraday data for '{ticker}'. Market may be closed.")
@@ -202,10 +229,11 @@ def get_sector_peers(ticker: str) -> list[str]:
     return []
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_stock_fundamentals(ticker: str) -> dict:
     """Fetch comprehensive fundamental data from yfinance."""
     stock = yf.Ticker(ticker)
-    info = stock.info
+    info = _yf_retry(lambda: stock.info)
     return {
         # Valuation
         "market_cap": info.get("marketCap"),
@@ -260,8 +288,10 @@ def scan_swing_opportunities(tickers: list[str]) -> list[dict]:
     from src.swing_trading import generate_swing_signals
 
     results = []
-    for t in tickers:
+    for i, t in enumerate(tickers):
         try:
+            if i > 0:
+                time.sleep(0.5)
             df = fetch_stock_data(t, period_years=1)
             df = add_technical_indicators(df)
             signal = generate_swing_signals(df)

@@ -6,14 +6,14 @@ import numpy as np
 
 from src.data_fetcher import (
     POPULAR_INDIAN_STOCKS, SECTOR_STOCKS, fetch_stock_data, get_stock_info,
-    get_stock_news, fetch_multiple_stocks, get_sector_peers,
-    fetch_intraday_data, get_stock_fundamentals, scan_swing_opportunities,
+    get_stock_news, fetch_multiple_stocks,
+    fetch_intraday_data, get_stock_fundamentals,
     get_sector_for_stock,
 )
 from src.hedge_trading import calculate_correlation_matrix, calculate_sharpe_ratio
 from src.feature_engineering import add_technical_indicators
 from src.predictor import train_and_predict, predict_with_saved_model
-from src.sentiment import is_sentiment_available, analyze_sentiment
+# sentiment imports done inline where needed (src.sentiment._parse_sentiment_response)
 from src.model import load_saved_model
 from src.prediction_tracker import (
     init_db, log_predictions, validate_pending_predictions,
@@ -21,7 +21,8 @@ from src.prediction_tracker import (
     should_relearn, relearn_models, compute_adaptive_weights,
     get_current_model_version,
 )
-from datetime import date
+from datetime import date, datetime
+import pytz
 from src.swing_trading import (
     calculate_pivot_points, calculate_support_resistance,
     calculate_fibonacci_retracements, calculate_atr_stop_loss,
@@ -31,6 +32,11 @@ from src.scalping import (
     add_scalping_indicators, generate_scalp_signal,
     get_scalping_levels, get_market_microstructure,
 )
+from src.paper_trading import (
+    init_paper_db, place_trade, check_open_trades,
+    close_trade, delete_trade, get_open_trades, get_trade_history, get_paper_stats,
+    clear_all_trades, init_paper_funds, get_fund_balance, set_fund_capital,
+)
 
 st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="wide")
 
@@ -38,127 +44,322 @@ st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout
 # PREDICTION TRACKING — init DB & auto-validate on load
 # ============================================================
 init_db()
+init_paper_db()
+init_paper_funds()
 
 @st.cache_data(ttl=300)
 def _auto_validate():
     return validate_pending_predictions()
 
+@st.cache_data(ttl=300)
+def _auto_check_paper_trades():
+    return check_open_trades()
+
 _auto_validate()
+_auto_check_paper_trades()
 
 # ============================================================
 # CLEAN DARK THEME CSS
 # ============================================================
 st.markdown("""<style>
+    /* === BASE RESET === */
+    .block-container { padding-top: 1rem; max-width: 1200px; }
+    h4, h3, h2 { color: #e8e8f8 !important; font-weight: 700 !important; letter-spacing: -0.3px; }
+
+    /* === ANIMATIONS (kept minimal) === */
+
     /* === ACTION CARDS === */
     .action-card {
-        padding: 28px 24px; border-radius: 14px; text-align: center;
-        font-size: 28px; font-weight: 800; color: #fff; margin: 14px 0;
-        border: 1px solid rgba(255,255,255,0.15);
-        box-shadow: 0 6px 24px rgba(0,0,0,0.35);
-        letter-spacing: 0.3px;
+        padding: 24px 24px; border-radius: 16px; text-align: center;
+        font-size: 24px; font-weight: 800; color: #fff; margin: 12px 0;
+        border: none;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        letter-spacing: 0.2px;
+        position: relative;
+        overflow: hidden;
+        transition: box-shadow 0.25s ease;
     }
-    .action-card span { display: block; font-size: 16px; font-weight: 500; opacity: 0.9; margin-top: 8px; }
-    .action-buy, .action-long, .action-up   { background: linear-gradient(135deg, #059669, #10b981); }
-    .action-sell, .action-short, .action-down { background: linear-gradient(135deg, #dc2626, #ef4444); }
-    .action-hold, .action-sideways           { background: linear-gradient(135deg, #b45309, #d97706); }
-    .action-notrade                          { background: linear-gradient(135deg, #374151, #4b5563); }
+    .action-card:hover {
+        box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    }
+    .action-card::before {
+        content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+        background: linear-gradient(90deg, rgba(255,255,255,0.1), rgba(255,255,255,0.35), rgba(255,255,255,0.1));
+    }
+    .action-card span { display: block; font-size: 14px; font-weight: 500; opacity: 0.92; margin-top: 8px; line-height: 1.5; }
+    .action-buy, .action-long, .action-up   { background: linear-gradient(135deg, #047857, #059669, #10b981); }
+    .action-sell, .action-short, .action-down { background: linear-gradient(135deg, #991b1b, #dc2626, #f87171); }
+    .action-hold, .action-sideways           { background: linear-gradient(135deg, #78350f, #b45309, #f59e0b); }
+    .action-notrade                          { background: linear-gradient(135deg, #111827, #1f2937, #374151); }
+
+    /* === BADGE === */
+    .badge-best {
+        display: inline-block; background: linear-gradient(135deg, #f59e0b, #fbbf24);
+        color: #1a1a2e; font-size: 11px; font-weight: 800; text-transform: uppercase;
+        letter-spacing: 0.8px; padding: 4px 12px; border-radius: 20px;
+        margin-left: 8px; vertical-align: middle; line-height: 1;
+        box-shadow: 0 2px 12px rgba(245,158,11,0.35);
+        box-shadow: 0 0 8px rgba(0,212,255,0.15);
+    }
+    .badge-rank {
+        display: inline-block; background: rgba(0,212,255,0.12);
+        color: #00d4ff; font-size: 11px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.6px; padding: 4px 12px; border-radius: 20px;
+        margin-left: 8px; vertical-align: middle; line-height: 1;
+        border: 1px solid rgba(0,212,255,0.25);
+        backdrop-filter: blur(4px);
+    }
+
+    /* === PROFIT / LOSS TEXT === */
+    .profit, .setup-card .profit, .setup-card .profit b { color: #34d399 !important; font-weight: 700; }
+    .loss, .setup-card .loss, .setup-card .loss b { color: #f87171 !important; font-weight: 700; }
+    .charges-dim, .setup-card .charges-dim { color: #6b6b80 !important; font-size: 13px; }
 
     /* === HELP BOX === */
     .help-box {
-        background: rgba(0,212,255,0.05); border-left: 4px solid #00d4ff;
-        padding: 16px 20px; border-radius: 0 10px 10px 0; margin: 12px 0;
-        font-size: 15px; color: #d0d0e0; line-height: 1.7;
+        background: rgba(0,212,255,0.03); border-left: 3px solid rgba(0,212,255,0.35);
+        padding: 14px 18px; border-radius: 0 10px 10px 0; margin: 10px 0;
+        font-size: 13px; color: #9999b0; line-height: 1.7;
+        backdrop-filter: blur(4px);
     }
-    .help-box b { color: #f0f0ff; }
+    .help-box b { color: #c0c0d8; }
 
     /* === SETUP CARD === */
     .setup-card {
-        background: #1a1a2e; padding: 22px; border-radius: 12px;
-        border: 1px solid #2a2a40; margin: 8px 0;
-        color: #d8d8e8; line-height: 2.0; font-size: 17px;
+        background: linear-gradient(135deg, #12122a, #141432); padding: 20px 22px; border-radius: 14px;
+        border: 1px solid #1e1e3a; margin: 8px 0;
+        color: #c8c8e0; line-height: 1.9; font-size: 15px;
+        transition: border-color 0.3s ease;
     }
-    .setup-card b { color: #f0f0ff; font-size: 17px; }
+    .setup-card:hover {
+        border-color: #2a2a50;
+    }
+    .setup-card b { color: #e0e0f0; font-size: 15px; }
 
     /* === VERDICT BOX === */
     .verdict-box {
-        padding: 16px 20px; border-radius: 10px; margin: 10px 0;
-        font-size: 16px; color: #d8d8e8; line-height: 1.7;
+        padding: 14px 18px; border-radius: 10px; margin: 8px 0;
+        font-size: 14px; color: #c8c8e0; line-height: 1.7;
     }
-    .verdict-box b { color: #f0f0ff; }
-    .good    { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.35); border-left: 4px solid #10b981; }
-    .bad     { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.35);  border-left: 4px solid #ef4444; }
-    .neutral { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); border-left: 4px solid #f59e0b; }
+    .verdict-box b { color: #e8e8f8; }
+    .good    { background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.2); border-left: 4px solid #10b981; }
+    .bad     { background: rgba(239,68,68,0.06);  border: 1px solid rgba(239,68,68,0.2);  border-left: 4px solid #ef4444; }
+    .neutral { background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.2); border-left: 4px solid #f59e0b; }
 
     /* === CHECKLIST === */
     .checklist {
-        background: #1a1a2e; padding: 18px 22px; border-radius: 12px; margin: 12px 0;
-        color: #d8d8e8; line-height: 2.1; font-size: 16px; border: 1px solid #2a2a40;
+        background: linear-gradient(135deg, #12122a, #141432); padding: 16px 20px; border-radius: 12px; margin: 10px 0;
+        color: #c8c8e0; line-height: 2.1; font-size: 14px; border: 1px solid #1e1e38;
     }
-    .checklist b { color: #f0f0ff; font-size: 17px; }
+    .checklist b { color: #e0e0f0; font-size: 15px; }
 
     /* === METRIC CARDS === */
     [data-testid="stMetric"] {
-        background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 12px; padding: 18px;
+        background: linear-gradient(135deg, #12122a, #141432); border: 1px solid #1e1e3a; border-radius: 14px; padding: 16px;
+        transition: border-color 0.3s ease;
     }
-    [data-testid="stMetricLabel"] { color: #9999b0 !important; font-size: 13px !important; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600 !important; }
-    [data-testid="stMetricValue"] { color: #f0f0ff !important; font-weight: 800 !important; font-size: 1.4rem !important; }
+    [data-testid="stMetric"]:hover {
+        border-color: rgba(0,212,255,0.25);
+    }
+    [data-testid="stMetricLabel"] { color: #7777a0 !important; font-size: 11px !important; text-transform: uppercase; letter-spacing: 1px; font-weight: 700 !important; }
+    [data-testid="stMetricValue"] { color: #e8e8f8 !important; font-weight: 800 !important; font-size: 1.3rem !important; }
+    [data-testid="stMetricDelta"] > div { font-size: 13px !important; }
 
     /* === TABS === */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 4px; background: #1a1a2e; border-radius: 10px; padding: 4px; border: 1px solid #2a2a40;
+        gap: 3px; background: rgba(13,13,30,0.8); border-radius: 14px; padding: 5px; border: 1px solid #1e1e38;
+        backdrop-filter: blur(8px);
+        overflow-x: auto;
     }
-    .stTabs [data-baseweb="tab"] { border-radius: 8px; padding: 10px 18px; color: #9999b0; font-weight: 600; font-size: 15px; }
-    .stTabs [aria-selected="true"] { background: #00d4ff !important; color: #0f0f1e !important; font-weight: 700; }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px; padding: 10px 18px; color: #7777a0; font-weight: 600; font-size: 13.5px;
+        transition: all 0.25s ease; white-space: nowrap;
+    }
+    .stTabs [data-baseweb="tab"]:hover { color: #c0c0e0; background: rgba(255,255,255,0.04); }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #00bce0, #00d4ff) !important;
+        color: #0a0a1a !important; font-weight: 700;
+        box-shadow: 0 4px 16px rgba(0,212,255,0.25);
+    }
 
     /* === BUTTONS === */
     .stButton > button[kind="primary"] {
-        background: #00d4ff !important; color: #0f0f1e !important;
-        border: none !important; border-radius: 8px !important; font-weight: 700 !important;
-        font-size: 15px !important; padding: 10px 20px !important;
+        background: linear-gradient(135deg, #00a8cc, #00d4ff) !important; color: #0a0a1a !important;
+        border: none !important; border-radius: 10px !important; font-weight: 700 !important;
+        font-size: 14px !important; padding: 10px 22px !important;
+        box-shadow: 0 4px 16px rgba(0,212,255,0.2);
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
     }
-    .stButton > button[kind="primary"]:hover { background: #00bce0 !important; }
+    .stButton > button[kind="primary"]:hover {
+        box-shadow: 0 6px 24px rgba(0,212,255,0.4) !important;
+    }
+    .stButton > button:not([kind="primary"]) {
+        border-radius: 10px !important;
+        border: 1px solid #2a2a4a !important;
+        transition: all 0.25s ease;
+    }
+    .stButton > button:not([kind="primary"]):hover {
+        border-color: #3a3a5a !important;
+        background: rgba(255,255,255,0.03) !important;
+    }
 
     /* === GRADIENT TITLE === */
     .app-title {
-        text-align: center; padding: 8px 0 4px 0;
+        text-align: center; padding: 10px 0 4px 0;
     }
     .app-title h1 {
-        background: linear-gradient(135deg, #00d4ff, #a855f7);
+        background: linear-gradient(135deg, #00d4ff 0%, #a855f7 50%, #f59e0b 100%);
+        background-size: 200% auto;
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        font-size: 2.4rem; font-weight: 800; margin: 0;
+        font-size: 2.4rem; font-weight: 800; margin: 0; letter-spacing: -0.5px;
     }
-    .app-title p { color: #8888a0; font-size: 15px; margin: 6px 0 0 0; }
+    .app-title p { color: #6b6b80; font-size: 13px; margin: 6px 0 0 0; letter-spacing: 0.3px; }
 
     /* === SCREENER PICK CARD === */
     .screener-pick {
-        background: #1a1a2e; padding: 20px; border-radius: 12px;
-        border: 1px solid #2a2a40; margin: 8px 0;
-        color: #d8d8e8; line-height: 1.9; font-size: 16px;
+        background: linear-gradient(135deg, #12122a, #141432); padding: 20px; border-radius: 14px;
+        border: 1px solid #1e1e38; margin: 8px 0;
+        color: #c8c8e0; line-height: 1.8; font-size: 14px;
+        transition: border-color 0.3s ease;
     }
-    .screener-pick b { color: #f0f0ff; }
+    .screener-pick:hover { border-color: #2a2a50; }
+    .screener-pick b { color: #e0e0f0; }
     .screener-pick .price { font-size: 22px; font-weight: 800; color: #00d4ff; }
-    .screener-pick .detail { font-size: 15px; color: #b0b0c8; }
+    .screener-pick .detail { font-size: 13px; color: #8888a8; }
+
+    /* === SECTION DIVIDER === */
+    .section-label {
+        font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;
+        color: #555578; margin: 20px 0 10px 0; padding-bottom: 8px;
+        border-bottom: 1px solid #1e1e38;
+    }
+
+    /* === STOCK BANNER === */
+    .stock-banner {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a30 100%);
+        border: 1px solid #2a2a45; border-radius: 18px;
+        padding: 28px 32px; margin-bottom: 20px;
+        position: relative; overflow: hidden;
+        transition: border-color 0.3s ease;
+    }
+    .stock-banner:hover { border-color: #3a3a55; }
+    .stock-banner::after {
+        content: ""; position: absolute; top: -50%; right: -20%; width: 300px; height: 300px;
+        background: radial-gradient(circle, rgba(0,212,255,0.04) 0%, transparent 70%);
+        pointer-events: none;
+    }
+
+    /* === QUICK STATS ROW === */
+    .quick-stats {
+        display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap;
+    }
+    .quick-stat {
+        background: rgba(18,18,42,0.7); border: 1px solid #1e1e3a; border-radius: 12px;
+        padding: 14px 20px; flex: 1; min-width: 140px; text-align: center;
+        backdrop-filter: blur(4px);
+        transition: border-color 0.3s ease;
+    }
+    .quick-stat:hover { border-color: rgba(0,212,255,0.2); }
+    .quick-stat .qs-label { font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; }
+    .quick-stat .qs-value { font-size: 18px; font-weight: 800; color: #e0e0f0; margin-top: 4px; }
+    .quick-stat .qs-delta { font-size: 13px; font-weight: 600; margin-top: 2px; }
 
     /* === DATAFRAME STYLING === */
-    .stDataFrame { font-size: 14px !important; }
+    .stDataFrame { font-size: 13px !important; }
+    .stDataFrame [data-testid="stDataFrameResizable"] {
+        border-radius: 12px; overflow: hidden;
+        border: 1px solid #1e1e38 !important;
+    }
 
     /* === FOOTER === */
     .footer-card {
-        background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 10px;
-        padding: 14px 18px; margin-top: 20px; text-align: center;
-        font-size: 13px; color: #6b6b80; line-height: 1.5;
+        background: linear-gradient(135deg, #0d0d1e, #111128); border: 1px solid #1e1e38; border-radius: 12px;
+        padding: 16px 20px; margin-top: 24px; text-align: center;
+        font-size: 12px; color: #555570; line-height: 1.6;
     }
-    .footer-card b { color: #d97706; }
+    .footer-card b { color: #b45309; }
 
     /* === PROMPT BOX === */
     .prompt-box {
-        background: #0f0f1e; border: 2px solid #2a2a40; border-radius: 12px;
-        padding: 20px; margin: 12px 0; font-family: monospace;
-        font-size: 13px; color: #d0d0e0; line-height: 1.6;
+        background: #0a0a1a; border: 1px solid #1e1e38; border-radius: 12px;
+        padding: 18px; margin: 10px 0; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 12px; color: #b0b0c8; line-height: 1.7;
         white-space: pre-wrap; word-wrap: break-word;
         max-height: 400px; overflow-y: auto;
     }
     .prompt-box b { color: #00d4ff; }
+
+    /* === EXPANDER === */
+    .streamlit-expanderHeader {
+        font-size: 14px !important; font-weight: 600 !important; color: #9999b0 !important;
+        border-radius: 10px !important;
+    }
+    .streamlit-expanderContent { border-color: #1e1e38 !important; }
+
+    /* === SIDEBAR === */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0d0d1e 0%, #111128 100%);
+        border-right: 1px solid #1e1e38;
+    }
+    [data-testid="stSidebar"] .stSelectbox label,
+    [data-testid="stSidebar"] .stSlider label,
+    [data-testid="stSidebar"] .stNumberInput label {
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        color: #9999b0 !important;
+    }
+
+    /* === EMPTY STATE === */
+    .empty-state {
+        text-align: center; padding: 48px 24px; color: #555578;
+    }
+    .empty-state .es-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+    .empty-state .es-title { font-size: 18px; font-weight: 700; color: #8888a0; margin-bottom: 6px; }
+    .empty-state .es-desc { font-size: 14px; color: #6b6b80; line-height: 1.6; }
+
+    /* === DIVIDERS === */
+    hr { border-color: #1e1e38 !important; opacity: 0.5; margin: 20px 0 !important; }
+
+    /* === SCROLLBAR === */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0a0a1a; }
+    ::-webkit-scrollbar-thumb { background: #2a2a40; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a55; }
+
+    /* === NUMBER INPUT / SELECT POLISH === */
+    .stNumberInput input, .stTextInput input {
+        border-radius: 10px !important;
+        transition: border-color 0.3s ease !important;
+    }
+    .stNumberInput input:focus, .stTextInput input:focus {
+        border-color: #00d4ff !important;
+        box-shadow: 0 0 0 2px rgba(0,212,255,0.15) !important;
+    }
+
+    /* === PROGRESS BAR === */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #00d4ff, #a855f7) !important;
+        border-radius: 4px;
+    }
+
+    /* === SCREENER ACTION BUTTONS === */
+    .scr-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .scr-btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        padding: 5px 10px; border-radius: 8px; font-size: 12px; font-weight: 600;
+        text-decoration: none; cursor: pointer; border: none; transition: all 0.2s;
+        flex: 1; text-align: center;
+    }
+    .scr-btn-trade {
+        background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3);
+    }
+    .scr-btn-trade:hover { background: rgba(16,185,129,0.25); }
+    .scr-btn-analyse {
+        background: rgba(0,212,255,0.1); color: #00d4ff; border: 1px solid rgba(0,212,255,0.25);
+    }
+    .scr-btn-analyse:hover { background: rgba(0,212,255,0.2); color: #00d4ff; text-decoration: none; }
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -166,49 +367,91 @@ st.markdown("""<style>
 # ============================================================
 st.markdown("""<div class="app-title">
     <h1>Indian Stock Market Predictor</h1>
-    <p>AI-powered predictions &bull; swing &amp; scalping tools &bull; screener &bull; fundamentals &bull; sector analysis</p>
+    <p>AI-Powered Predictions &bull; Swing &amp; Scalp Trading &bull; Multi-Factor Screener &bull; Fundamentals</p>
 </div>""", unsafe_allow_html=True)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
+_qp_stock = st.query_params.get("stock")
+
 with st.sidebar:
-    st.header("Pick a Stock")
+    st.markdown("""<div style="text-align: center; padding: 4px 0 12px 0;">
+        <span style="font-size: 28px;">📈</span>
+        <div style="font-size: 15px; font-weight: 700; color: #e0e0f0; margin-top: 2px;">Stock Predictor</div>
+        <div style="font-size: 11px; color: #6b6b80;">AI-Powered Analysis</div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("##### Select Stock")
     stock_options = {f"{name} ({ticker})": ticker for ticker, name in POPULAR_INDIAN_STOCKS.items()}
-    selected_label = st.selectbox("Select Stock", options=list(stock_options.keys()),
-                                  help="Pick any popular Indian stock to analyze")
+    _stock_keys = list(stock_options.keys())
+    _default_stock_idx = 0
+    if _qp_stock:
+        _qp_upper = _qp_stock.strip().upper()
+        for _i, _key in enumerate(_stock_keys):
+            if _qp_upper in _key:
+                _default_stock_idx = _i
+                break
+    selected_label = st.selectbox("Select Stock", options=_stock_keys,
+                                  index=_default_stock_idx,
+                                  help="Pick any popular Indian stock to analyze",
+                                  label_visibility="collapsed")
     ticker = stock_options[selected_label]
 
-    custom_ticker = st.text_input("Or enter custom ticker", placeholder="e.g. ADANIENT.NS",
-                                  help="Add .NS for NSE stocks, .BO for BSE stocks")
+    custom_ticker = st.text_input("Custom ticker", placeholder="e.g. ADANIENT.NS",
+                                  help="Add .NS for NSE, .BO for BSE",
+                                  label_visibility="collapsed")
     if custom_ticker.strip():
         ticker = custom_ticker.strip().upper()
+    elif _qp_stock and _qp_stock.strip().upper() not in POPULAR_INDIAN_STOCKS:
+        ticker = _qp_stock.strip().upper()
 
     st.divider()
-    st.header("Settings")
-    forecast_days = st.slider("How many days to predict?", min_value=1, max_value=30, value=7,
+    st.markdown("##### Prediction Settings")
+    forecast_days = st.slider("Forecast days", min_value=1, max_value=30, value=7,
                               help="Shorter = more accurate. 7 days is a good balance.")
-    epochs = st.slider("Training quality", min_value=10, max_value=150, value=80,
+    epochs = st.slider("Training quality (epochs)", min_value=10, max_value=150, value=80,
                        help="Higher = better model but slower training. 80 is recommended.")
 
-    with st.expander("Advanced Model Settings"):
-        st.caption("Leave these as default unless you know what you're doing")
+    with st.expander("Advanced Model Settings", expanded=False):
+        st.caption("Leave defaults unless experienced")
         xgb_weight = st.slider("XGBoost Weight", 0.2, 0.8, 0.55, 0.05,
                                help="How much to trust XGBoost vs LSTM.")
         use_market_context = st.checkbox("Include market data (Nifty/VIX)", value=True,
                                          help="Uses overall market trends to improve predictions")
 
-    with st.expander("Swing Trading Settings"):
-        capital = st.number_input("Your capital (₹)", 10000, 10000000, 100000, step=10000,
+    with st.expander("Swing Trading Settings", expanded=False):
+        capital = st.number_input("Capital (₹)", 10000, 10000000, 100000, step=10000,
                                   help="How much money you plan to invest")
         max_risk_pct = st.slider("Max risk per trade (%)", 0.5, 5.0, 2.0, 0.5,
-                                 help="Maximum % of capital you're willing to lose. 2% is safe.")
-        sr_lookback = st.slider("Analysis period (days)", 30, 180, 90,
-                                help="How far back to look for support/resistance levels")
+                                 help="Maximum % of capital to risk. 2% is safe.")
+        sr_lookback = st.slider("Analysis lookback (days)", 30, 180, 90,
+                                help="How far back for support/resistance levels")
         pivot_method = st.selectbox("Pivot calculation", ["standard", "fibonacci", "camarilla", "woodie"])
 
+    with st.expander("Paper Trading Funds", expanded=False):
+        st.caption("Set capital for paper trading. Scalp trades get 5× leverage (buy ₹5L with ₹1L).")
+        _cur_swing_fund = get_fund_balance("swing")
+
+        _fund_input = st.number_input(
+            "Trading Capital (₹)", 0, 50000000,
+            int(_cur_swing_fund["initial_capital"]),
+            step=50000, key="sidebar_trading_fund",
+            help="Capital for paper trading. Swing uses full amount, scalp gets 5× leverage.",
+        )
+        if st.button("Update Funds", key="sidebar_update_funds", use_container_width=True):
+            set_fund_capital("swing", _fund_input)
+            set_fund_capital("scalp", _fund_input)
+            st.success("Funds updated!")
+            st.rerun()
+
     st.divider()
-    st.info("Sentiment: Copy-paste prompt mode (no API key needed)")
+    st.markdown("""<div style="background: rgba(0,212,255,0.05); border: 1px solid rgba(0,212,255,0.15);
+        border-radius: 10px; padding: 10px 14px; font-size: 12px; color: #8888a0; line-height: 1.5;">
+        💡 <b style="color: #b0b0d0;">Tip:</b> Start with the <b style="color: #00d4ff;">Chart</b> tab to see
+        the stock's current health, then check <b style="color: #00d4ff;">Swing</b> or
+        <b style="color: #00d4ff;">Scalping</b> for trading signals.
+    </div>""", unsafe_allow_html=True)
 
 # ============================================================
 # FETCH DATA
@@ -227,59 +470,154 @@ except Exception as e:
 # ============================================================
 price_change = raw_df["Close"].iloc[-1] - raw_df["Close"].iloc[-2]
 pct_change = (price_change / raw_df["Close"].iloc[-2]) * 100
-change_color = "#10b981" if pct_change >= 0 else "#ef4444"
+change_color = "#34d399" if pct_change >= 0 else "#f87171"
 change_arrow = "▲" if pct_change >= 0 else "▼"
+change_bg = "rgba(16,185,129,0.1)" if pct_change >= 0 else "rgba(239,68,68,0.1)"
 mcap_str = f"₹{info['market_cap'] / 1e7:,.0f} Cr" if info["market_cap"] else "N/A"
 
-st.markdown(f"""<div style="
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    border: 1px solid #2a2a40; border-radius: 14px;
-    padding: 24px 28px; margin-bottom: 16px;
-">
-    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+# 52-week range for context
+w52_high = info.get("year_high", raw_df["High"].tail(252).max())
+w52_low = info.get("year_low", raw_df["Low"].tail(252).min())
+cur_price = info['current_price']
+w52_pct = ((cur_price - w52_low) / (w52_high - w52_low) * 100) if w52_high > w52_low else 50
+
+# 5-day trend mini indicator
+recent_5d = raw_df["Close"].tail(5)
+trend_5d_pct = ((recent_5d.iloc[-1] - recent_5d.iloc[0]) / recent_5d.iloc[0] * 100) if len(recent_5d) >= 5 else 0
+trend_5d_color = "#34d399" if trend_5d_pct >= 0 else "#f87171"
+trend_5d_arrow = "▲" if trend_5d_pct >= 0 else "▼"
+
+# Volume context
+avg_vol = raw_df["Volume"].tail(20).mean()
+today_vol = raw_df["Volume"].iloc[-1]
+vol_ratio_banner = today_vol / avg_vol if avg_vol > 0 else 1
+
+st.markdown(f"""<div class="stock-banner">
+    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px;">
         <div>
-            <div style="font-size: 28px; font-weight: 800; color: #f0f0ff; letter-spacing: 0.3px;">
+            <div style="font-size: 30px; font-weight: 800; color: #f0f0ff; letter-spacing: 0.3px;">
                 {info['name']}
             </div>
-            <div style="font-size: 15px; color: #8888a0; margin-top: 4px;">
-                {ticker} &bull; {info['sector']}
+            <div style="display: flex; align-items: center; gap: 12px; margin-top: 6px;">
+                <span style="font-size: 14px; color: #8888a0; font-weight: 600;">{ticker}</span>
+                <span style="background: rgba(168,85,247,0.12); color: #c084fc; font-size: 11px; font-weight: 700;
+                       padding: 3px 10px; border-radius: 6px; letter-spacing: 0.3px;">{info['sector']}</span>
             </div>
         </div>
-        <div style="display: flex; gap: 32px; align-items: center; flex-wrap: wrap;">
+        <div style="display: flex; gap: 28px; align-items: center; flex-wrap: wrap;">
             <div style="text-align: right;">
-                <div style="font-size: 32px; font-weight: 800; color: #00d4ff;">
-                    ₹{info['current_price']:,.2f}
+                <div style="font-size: 34px; font-weight: 800; color: #00d4ff; line-height: 1.1;">
+                    ₹{cur_price:,.2f}
                 </div>
-                <div style="font-size: 17px; font-weight: 600; color: {change_color}; margin-top: 2px;">
-                    {change_arrow} ₹{abs(price_change):,.2f} ({pct_change:+.2f}%)
+                <div style="display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;
+                            background: {change_bg}; padding: 4px 12px; border-radius: 8px;">
+                    <span style="font-size: 16px; font-weight: 700; color: {change_color};">
+                        {change_arrow} ₹{abs(price_change):,.2f} ({pct_change:+.2f}%)
+                    </span>
                 </div>
             </div>
-            <div style="text-align: right; border-left: 1px solid #2a2a40; padding-left: 24px;">
-                <div style="font-size: 12px; color: #8888a0; text-transform: uppercase; letter-spacing: 0.5px;">Market Cap</div>
-                <div style="font-size: 20px; font-weight: 700; color: #d8d8e8;">{mcap_str}</div>
+            <div style="text-align: center; border-left: 1px solid #2a2a45; padding-left: 24px;">
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700;">Market Cap</div>
+                <div style="font-size: 20px; font-weight: 700; color: #d8d8e8; margin-top: 2px;">{mcap_str}</div>
+            </div>
+            <div style="text-align: center; border-left: 1px solid #2a2a45; padding-left: 24px;">
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700;">5-Day</div>
+                <div style="font-size: 18px; font-weight: 700; color: {trend_5d_color}; margin-top: 2px;">{trend_5d_arrow} {trend_5d_pct:+.1f}%</div>
             </div>
         </div>
+    </div>
+    <div style="margin-top: 16px; display: flex; align-items: center; gap: 12px;">
+        <span style="font-size: 11px; color: #6b6b80; font-weight: 600;">52W LOW ₹{w52_low:,.0f}</span>
+        <div style="flex: 1; height: 6px; background: #1e1e38; border-radius: 3px; position: relative; overflow: hidden;">
+            <div style="width: {w52_pct:.0f}%; height: 100%; border-radius: 3px;
+                        background: linear-gradient(90deg, #ef4444, #f59e0b, #10b981);"></div>
+            <div style="position: absolute; left: {w52_pct:.0f}%; top: -4px; width: 3px; height: 14px;
+                        background: #00d4ff; border-radius: 2px; transform: translateX(-50%);
+                        box-shadow: 0 0 8px rgba(0,212,255,0.5);"></div>
+        </div>
+        <span style="font-size: 11px; color: #6b6b80; font-weight: 600;">52W HIGH ₹{w52_high:,.0f}</span>
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ============================================================
+# QUICK STATS ROW
+# ============================================================
+latest_row = df.iloc[-1]
+qs_rsi = latest_row.get("RSI", 50)
+qs_rsi_color = "#f87171" if qs_rsi > 70 else "#34d399" if qs_rsi < 30 else "#e0e0f0"
+qs_rsi_label = "Overbought" if qs_rsi > 70 else "Oversold" if qs_rsi < 30 else "Neutral"
+qs_macd = latest_row.get("MACD", 0)
+qs_macd_sig = latest_row.get("MACD_Signal", 0)
+qs_macd_color = "#34d399" if qs_macd > qs_macd_sig else "#f87171"
+qs_macd_label = "Bullish" if qs_macd > qs_macd_sig else "Bearish"
+qs_adx = latest_row.get("ADX", 0)
+qs_adx_label = "Strong" if qs_adx > 25 else "Weak"
+qs_vol = latest_row.get("Volume_Ratio", 1)
+qs_vol_color = "#34d399" if qs_vol > 1.2 else "#f87171" if qs_vol < 0.7 else "#e0e0f0"
+
+st.markdown(f"""<div class="quick-stats">
+    <div class="quick-stat">
+        <div class="qs-label">RSI</div>
+        <div class="qs-value" style="color: {qs_rsi_color};">{qs_rsi:.0f}</div>
+        <div class="qs-delta" style="color: {qs_rsi_color};">{qs_rsi_label}</div>
+    </div>
+    <div class="quick-stat">
+        <div class="qs-label">MACD</div>
+        <div class="qs-value" style="color: {qs_macd_color};">{qs_macd:.2f}</div>
+        <div class="qs-delta" style="color: {qs_macd_color};">{qs_macd_label}</div>
+    </div>
+    <div class="quick-stat">
+        <div class="qs-label">ADX (Trend)</div>
+        <div class="qs-value">{qs_adx:.0f}</div>
+        <div class="qs-delta" style="color: {'#34d399' if qs_adx > 25 else '#7777a0'};">{qs_adx_label} Trend</div>
+    </div>
+    <div class="quick-stat">
+        <div class="qs-label">Volume</div>
+        <div class="qs-value" style="color: {qs_vol_color};">{qs_vol:.1f}x</div>
+        <div class="qs-delta" style="color: {qs_vol_color};">vs 20d avg</div>
+    </div>
+    <div class="quick-stat">
+        <div class="qs-label">Day Range</div>
+        <div class="qs-value">₹{raw_df['Low'].iloc[-1]:,.0f}-{raw_df['High'].iloc[-1]:,.0f}</div>
+        <div class="qs-delta" style="color: #7777a0;">Today</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
 # ============================================================
 # TABS
 # ============================================================
-tab_portfolio, tab_screener, tab_chart, tab_predict, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment, tab_accuracy = st.tabs([
-    "💼 Portfolio", "🔍 Screener", "📊 Chart", "🤖 Predictions",
-    "📈 Swing", "⚡ Scalping", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment", "🎯 Accuracy",
-])
+_TAB_NAMES = [
+    "🔍 Screener", "📊 Chart & Predictions",
+    "📈 Swing", "⚡ Scalping", "📝 Paper Trading", "📋 Fundamentals", "🏭 Sector", "📰 Sentiment", "🎯 Accuracy",
+]
+_TAB_KEYS = ["screener", "chart", "swing", "scalp", "paper", "fundamentals", "sector", "sentiment", "accuracy"]
+
+tab_screener, tab_chart, tab_swing, tab_scalp, tab_paper, tab_fund, tab_sector, tab_sentiment, tab_accuracy = st.tabs(_TAB_NAMES)
+
+# Auto-switch tab from URL query param (?tab=swing)
+_qp_tab = st.query_params.get("tab")
+if _qp_tab and _qp_tab in _TAB_KEYS:
+    _tab_idx = _TAB_KEYS.index(_qp_tab)
+    import streamlit.components.v1 as _components
+    _components.html(f"""
+        <script>
+            const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs.length > {_tab_idx}) tabs[{_tab_idx}].click();
+        </script>
+    """, height=0)
 
 # ============================================================
 # PLOTLY DEFAULTS
 # ============================================================
 CHART_LAYOUT = dict(
     template="plotly_dark",
-    paper_bgcolor="#0f0f1e",
-    plot_bgcolor="#0f0f1e",
-    font=dict(color="#c0c0d0"),
-    xaxis=dict(gridcolor="#1e1e35", zerolinecolor="#1e1e35"),
-    yaxis=dict(gridcolor="#1e1e35", zerolinecolor="#1e1e35"),
+    paper_bgcolor="#0e0e1c",
+    plot_bgcolor="#0e0e1c",
+    font=dict(color="#c0c0d0", family="Inter, sans-serif"),
+    xaxis=dict(gridcolor="#1a1a32", zerolinecolor="#1a1a32", gridwidth=1),
+    yaxis=dict(gridcolor="#1a1a32", zerolinecolor="#1a1a32", gridwidth=1),
+    margin=dict(l=10, r=10, t=30, b=10),
+    hoverlabel=dict(bgcolor="#1a1a2e", font_size=13, font_color="#e0e0f0", bordercolor="#2a2a45"),
 )
 
 # colors
@@ -310,6 +648,50 @@ def checklist(items: list[tuple[str, bool]]):
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
+def calc_angel_one_charges(buy_price: float, sell_price: float, qty: int = 1) -> dict:
+    """Calculate Angel One brokerage and net profit for a trade.
+
+    Charges: lower of ₹20 or 0.1% per executed order, minimum ₹5.
+    Additional charges: STT, exchange txn, SEBI, stamp duty, GST.
+    """
+    buy_value = buy_price * qty
+    sell_value = sell_price * qty
+    turnover = buy_value + sell_value
+
+    # Brokerage: min(₹20, 0.1% of order value), minimum ₹5 per side
+    buy_brokerage = max(5, min(20, buy_value * 0.001))
+    sell_brokerage = max(5, min(20, sell_value * 0.001))
+    total_brokerage = buy_brokerage + sell_brokerage
+
+    # STT: 0.025% on sell side (intraday equity)
+    stt = sell_value * 0.00025
+
+    # Exchange transaction: 0.00345% on turnover (NSE)
+    exchange_txn = turnover * 0.0000345
+
+    # SEBI charges: ₹10 per crore
+    sebi = turnover * 0.000001
+
+    # Stamp duty: 0.003% on buy side
+    stamp_duty = buy_value * 0.00003
+
+    # GST: 18% on (brokerage + exchange txn + SEBI)
+    gst = (total_brokerage + exchange_txn + sebi) * 0.18
+
+    total_charges = total_brokerage + stt + exchange_txn + sebi + stamp_duty + gst
+    gross_profit = (sell_price - buy_price) * qty
+    net_profit = gross_profit - total_charges
+
+    return {
+        "gross_profit": round(gross_profit, 2),
+        "total_charges": round(total_charges, 2),
+        "net_profit": round(net_profit, 2),
+        "brokerage": round(total_brokerage, 2),
+        "stt": round(stt, 2),
+        "gst": round(gst, 2),
+        "other": round(exchange_txn + sebi + stamp_duty, 2),
+    }
+
 def interpret_rsi(rsi):
     if rsi > 70: return "Overbought — stock may be overpriced, could drop soon", "bad"
     if rsi < 30: return "Oversold — stock may be underpriced, could bounce up", "good"
@@ -325,9 +707,9 @@ def interpret_macd(macd, signal):
 # ========================================================================
 with tab_chart:
     help_box("Green candles = price went up. Red candles = price went down. "
-             "Lines show average prices over different time periods.")
+             "Lines show average prices over different time periods. Use the checkboxes to customize the chart.")
 
-    cc1, cc2, cc3 = st.columns(3)
+    cc1, cc2, cc3, cc4 = st.columns([1, 1, 1, 2])
     show_sma = cc1.checkbox("Moving Averages", value=True)
     show_bollinger = cc2.checkbox("Bollinger Bands", value=False)
     show_volume = cc3.checkbox("Volume", value=True)
@@ -408,11 +790,8 @@ with tab_chart:
             (f"Short-term {'uptrend' if sma_20 > sma_50 else 'downtrend'} (20d vs 50d)", sma_20 > sma_50),
         ])
 
-
-# ========================================================================
-# TAB 2: PREDICTIONS
-# ========================================================================
-with tab_predict:
+    # ---- AI PREDICTIONS (merged into Chart tab) ----
+    st.markdown("<div class='section-label'>AI Price Predictions</div>", unsafe_allow_html=True)
     help_box(
         "Our AI uses <b>LSTM</b> (neural network) + <b>XGBoost</b> (decision trees), "
         "blended together for best accuracy. Click <b>Train & Predict</b> to start."
@@ -420,12 +799,20 @@ with tab_predict:
 
     c_train, c_load = st.columns(2)
     with c_train:
-        train_btn = st.button("Train & Predict", type="primary", use_container_width=True,
+        train_btn = st.button("🚀 Train & Predict", type="primary", use_container_width=True,
                               help="Trains on 5 years of data. Takes 2-5 minutes.")
     with c_load:
         saved = load_saved_model(ticker)
-        load_btn = st.button("Use Saved Model" if saved else "No Saved Model",
+        load_btn = st.button("📂 Use Saved Model" if saved else "No Saved Model",
                              disabled=saved is None, use_container_width=True)
+
+    if "prediction_results" not in st.session_state and not train_btn and not load_btn:
+        st.markdown("""<div class="empty-state">
+            <div class="es-icon">🤖</div>
+            <div class="es-title">No predictions yet</div>
+            <div class="es-desc">Click <b>Train & Predict</b> to train AI models on 5 years of data,<br>
+            or <b>Use Saved Model</b> if you've trained before.</div>
+        </div>""", unsafe_allow_html=True)
 
     if train_btn:
         progress_bar = st.progress(0, text="Training AI models...")
@@ -618,24 +1005,80 @@ with tab_swing:
     help_box("• <b>Entry</b> = price to buy/sell at • <b>Stop Loss</b> = exit here to limit loss "
              "• <b>Targets</b> = take profit here • <b>R:R</b> = risk vs reward (1:2 = risk ₹1 to gain ₹2)")
 
+    swing_qty = st.number_input("Quantity (shares)", min_value=1, value=10, step=5, key="swing_qty",
+                                help="Number of shares for profit calculation")
+
+    # Calculate profit after Angel One charges for each target
+    if signal.signal == "SELL":
+        sw_t1 = calc_angel_one_charges(setup.target_1, setup.entry_price, swing_qty)
+        sw_t2 = calc_angel_one_charges(setup.target_2, setup.entry_price, swing_qty)
+        sw_t3 = calc_angel_one_charges(setup.target_3, setup.entry_price, swing_qty)
+        sw_sl = calc_angel_one_charges(setup.stop_loss, setup.entry_price, swing_qty)
+    else:  # BUY or HOLD — treat as buy for display
+        sw_t1 = calc_angel_one_charges(setup.entry_price, setup.target_1, swing_qty)
+        sw_t2 = calc_angel_one_charges(setup.entry_price, setup.target_2, swing_qty)
+        sw_t3 = calc_angel_one_charges(setup.entry_price, setup.target_3, swing_qty)
+        sw_sl = calc_angel_one_charges(setup.entry_price, setup.stop_loss, swing_qty)
+
     p1, p2 = st.columns(2)
     with p1:
-        st.markdown(f"""<div class='setup-card'>
-            <b>📍 Entry:</b> ₹{setup.entry_price:,.2f}<br>
-            <b>🛑 Stop Loss:</b> ₹{setup.stop_loss:,.2f} <span style='color:#ef4444'>(−{abs(setup.entry_price - setup.stop_loss) / setup.entry_price * 100:.1f}%)</span><br>
-            <b>💰 Position:</b> {setup.position_size_pct:.1f}% of ₹{capital:,}<br>
-            <b>📊 Volatility:</b> {atr_data['volatility_regime']} (ATR: ₹{atr_data['current_atr']:.2f})
+        sl_pct = abs(setup.entry_price - setup.stop_loss) / setup.entry_price * 100
+        st.markdown(f"""<div class='setup-card' style='border-left: 3px solid #00d4ff;'>
+            <b>Entry:</b> ₹{setup.entry_price:,.2f}<br>
+            <b>Stop Loss:</b> ₹{setup.stop_loss:,.2f} <span class='loss'>(−{sl_pct:.1f}%)</span><br>
+            <b>Position:</b> {setup.position_size_pct:.1f}% of ₹{capital:,}<br>
+            <b>Volatility:</b> {atr_data['volatility_regime']} (ATR: ₹{atr_data['current_atr']:.2f})<br>
+            <span class='loss'><b>If stopped:</b> -₹{abs(sw_sl['net_profit']):,.2f} ({swing_qty} shares)</span>
         </div>""", unsafe_allow_html=True)
     with p2:
-        st.markdown(f"""<div class='setup-card'>
-            <b>🎯 Target 1:</b> ₹{setup.target_1:,.2f} <span style='color:#10b981'>(R:R 1:{setup.risk_reward_1})</span><br>
-            <b>🎯 Target 2:</b> ₹{setup.target_2:,.2f} <span style='color:#10b981'>(R:R 1:{setup.risk_reward_2})</span><br>
-            <b>🎯 Target 3:</b> ₹{setup.target_3:,.2f} <span style='color:#10b981'>(R:R 1:{setup.risk_reward_3})</span>
+        t1_cls = "profit" if sw_t1["net_profit"] > 0 else "loss"
+        t2_cls = "profit" if sw_t2["net_profit"] > 0 else "loss"
+        t3_cls = "profit" if sw_t3["net_profit"] > 0 else "loss"
+        st.markdown(f"""<div class='setup-card' style='border-left: 3px solid #10b981;'>
+            <b>Target 1:</b> ₹{setup.target_1:,.2f} (1:{setup.risk_reward_1})
+            — <span class='{t1_cls}'><b>Net ₹{sw_t1['net_profit']:,.2f}</b></span>
+            <span class='charges-dim'>(charges ₹{sw_t1['total_charges']:.2f})</span><br>
+            <b>Target 2:</b> ₹{setup.target_2:,.2f} (1:{setup.risk_reward_2})
+            — <span class='{t2_cls}'><b>Net ₹{sw_t2['net_profit']:,.2f}</b></span>
+            <span class='charges-dim'>(charges ₹{sw_t2['total_charges']:.2f})</span><br>
+            <b>Target 3:</b> ₹{setup.target_3:,.2f} (1:{setup.risk_reward_3})
+            — <span class='{t3_cls}'><b>Net ₹{sw_t3['net_profit']:,.2f}</b></span>
+            <span class='charges-dim'>(charges ₹{sw_t3['total_charges']:.2f})</span>
         </div>""", unsafe_allow_html=True)
 
     risk_amount = setup.entry_price - setup.stop_loss if signal.signal == "BUY" else setup.stop_loss - setup.entry_price
     max_loss = abs(risk_amount) * (capital * setup.position_size_pct / 100) / setup.entry_price
     verdict_box(f"⚠️ <b>Max loss if stopped out:</b> ~₹{max_loss:,.0f} ({max_risk_pct:.1f}% of capital). Always use a stop loss!", "neutral")
+
+    # Paper trade button for swing
+    if signal.signal in ("BUY", "SELL"):
+        _sw_capital_needed = setup.entry_price * swing_qty
+        _sw_fund = get_fund_balance("swing")
+        _sw_fund_active = _sw_fund["initial_capital"] > 0
+        _sw_btn_label = f"📝 Paper Trade — {signal.signal} {ticker}"
+        if _sw_fund_active:
+            _sw_btn_label += f" (₹{_sw_capital_needed:,.0f})"
+        if _sw_fund_active and _sw_fund["available"] < _sw_capital_needed:
+            st.warning(f"Insufficient swing funds. Need ₹{_sw_capital_needed:,.0f}, available ₹{_sw_fund['available']:,.0f}")
+        if st.button(_sw_btn_label, key="swing_paper_btn", type="secondary"):
+            try:
+                tid = place_trade(
+                    ticker=ticker,
+                    trade_type="swing",
+                    direction=signal.signal,
+                    entry_price=setup.entry_price,
+                    stop_loss=setup.stop_loss,
+                    target_1=setup.target_1,
+                    target_2=setup.target_2,
+                    target_3=setup.target_3,
+                    quantity=swing_qty,
+                    signal_strength=signal.strength,
+                    confidence=signal.confidence,
+                    reasons=", ".join(signal.reasons) if signal.reasons else "",
+                )
+                st.success(f"Swing paper trade #{tid} placed! Entry ₹{setup.entry_price:,.2f} × {swing_qty} shares")
+            except ValueError as e:
+                st.error(str(e))
 
     # S/R Chart
     st.markdown("#### Support & Resistance")
@@ -677,15 +1120,18 @@ with tab_swing:
             s = "good" if "bullish" in p["implication"].lower() else "bad" if "bearish" in p["implication"].lower() else "neutral"
             verdict_box(f"<b>{p['pattern']}</b> ({p['confidence']*100:.0f}%) — {p['implication']}", s)
     else:
-        st.info("No significant chart patterns detected.")
+        st.markdown("""<div class="empty-state" style="padding: 24px;">
+            <div class="es-icon" style="font-size: 32px;">🔎</div>
+            <div class="es-title" style="font-size: 15px;">No chart patterns detected</div>
+            <div class="es-desc" style="font-size: 13px;">No significant bullish or bearish patterns found in recent data.</div>
+        </div>""", unsafe_allow_html=True)
 
 
 # ========================================================================
 # TAB 4: SCALPING
 # ========================================================================
 with tab_scalp:
-    help_box("<b>Scalping</b> = ultra-short-term trading on 5-min candles. Buy and sell within minutes/hours. "
-             "⚠️ Fast-paced and risky — always use stop losses!")
+    help_box("<b>Scalping</b> = buy & sell within minutes on 5-min candles. Always use stop losses!")
 
     # Check if screener has scalp data for this ticker
     screener_scalp_match = None
@@ -702,6 +1148,11 @@ with tab_scalp:
     with sc2:
         scalp_btn = st.button("Load Intraday Data", type="primary", use_container_width=True)
 
+    # Clear stale scalp data if ticker changed
+    if "scalp_data_ticker" in st.session_state and st.session_state["scalp_data_ticker"] != ticker:
+        st.session_state.pop("scalp_data", None)
+        st.session_state.pop("scalp_data_ticker", None)
+
     if scalp_btn:
         with st.spinner("Fetching 5-min candles..."):
             try:
@@ -709,9 +1160,18 @@ with tab_scalp:
                 idf = add_scalping_indicators(idf)
                 st.session_state["scalp_data"] = idf
                 st.session_state["scalp_data_ticker"] = ticker
+                st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
                 st.info("Intraday data only available during market hours (Mon-Fri, 9:15 AM - 3:30 PM IST)")
+
+    if "scalp_data" not in st.session_state and not scalp_btn:
+        st.markdown("""<div class="empty-state">
+            <div class="es-icon">⚡</div>
+            <div class="es-title">Load intraday data to begin</div>
+            <div class="es-desc">Click <b>Load Intraday Data</b> above to fetch 5-minute candles<br>
+            and generate scalping signals with entry/exit levels.</div>
+        </div>""", unsafe_allow_html=True)
 
     if "scalp_data" in st.session_state:
         idf = st.session_state["scalp_data"]
@@ -719,66 +1179,125 @@ with tab_scalp:
         levels = get_scalping_levels(idf)
         micro = get_market_microstructure(idf)
 
+        # --- Signal + scalpability in one row ---
+        scalpability = micro["scalpability_score"]
         scalp_class = {"LONG": "action-long", "SHORT": "action-short", "NO_TRADE": "action-notrade"}
         scalp_label = {"LONG": "BUY (Long)", "SHORT": "SELL (Short)", "NO_TRADE": "NO TRADE — Wait"}
         scalp_advice = {"LONG": "Price likely going UP.", "SHORT": "Price likely going DOWN.", "NO_TRADE": "Signals weak — don't trade."}
-        action_card(scalp_label.get(ss.signal, "NO TRADE"),
-                    f"{ss.strength} | {ss.confidence*100:.0f}% — {scalp_advice.get(ss.signal, '')}", scalp_class.get(ss.signal, "action-notrade"))
+        scalp_score_color = "#10b981" if scalpability >= 65 else "#f59e0b" if scalpability >= 40 else "#ef4444"
+        action_card(
+            scalp_label.get(ss.signal, "NO TRADE"),
+            f"{ss.strength} | {ss.confidence*100:.0f}% — {scalp_advice.get(ss.signal, '')} "
+            f"| Scalpability: <span style='color:{scalp_score_color}'>{scalpability}/100</span>",
+            scalp_class.get(ss.signal, "action-notrade"),
+        )
 
-        # Show screener consistency check
-        if screener_scalp_match:
-            scr_sig = screener_scalp_match["signal"]
-            if scr_sig == ss.signal:
-                verdict_box(f"Screener agrees: <b>{scr_sig}</b> — signals are consistent.", "good")
-            else:
+        # --- MARKET TIME WARNING ---
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        is_weekday = now_ist.weekday() < 5
+
+        if is_weekday and market_open <= now_ist <= market_close:
+            mins_left = int((market_close - now_ist).total_seconds() / 60)
+            if mins_left <= 30:
                 verdict_box(
-                    f"Screener showed <b>{scr_sig}</b> but current data shows <b>{ss.signal}</b>. "
-                    f"Signals changed since screener ran (screener scalpability: {screener_scalp_match['scalpability']}/100). "
-                    f"<b>Trust the latest signal above</b> — it uses fresher data.",
-                    "neutral"
-                )
+                    f"<b>Market closes in {mins_left} min!</b> Avoid new scalp trades — "
+                    f"not enough time for targets to be reached. Exit open positions.", "bad")
+            elif mins_left <= 60:
+                verdict_box(
+                    f"<b>{mins_left} min to market close.</b> Use tighter targets only. "
+                    f"Target 2 unlikely — focus on Target 1 or skip.", "neutral")
+            elif mins_left <= 90:
+                verdict_box(f"<b>{mins_left} min to close.</b> Be selective — only high-confidence setups.", "neutral")
+        elif is_weekday and now_ist > market_close:
+            verdict_box("<b>Market closed.</b> Data from last trading session.", "neutral")
+        elif not is_weekday:
+            verdict_box("<b>Weekend — market closed.</b> Data from last trading session.", "neutral")
 
-        scalpability = micro["scalpability_score"]
-        if scalpability >= 65:
-            verdict_box(f"⚡ <b>Scalpability: {scalpability}/100 — Good!</b> {micro['volatility_regime']} volatility, {micro['volume_status'].lower()} volume, {micro['trend'].lower()}.", "good")
-        elif scalpability >= 40:
-            verdict_box(f"⚡ <b>Scalpability: {scalpability}/100 — Moderate.</b> Proceed with caution.", "neutral")
-        else:
-            verdict_box(f"⚡ <b>Scalpability: {scalpability}/100 — Poor.</b> Low volatility/volume. Consider waiting.", "bad")
+        # Screener consistency (compact)
+        if screener_scalp_match and screener_scalp_match["signal"] != ss.signal:
+            verdict_box(
+                f"Screener showed <b>{screener_scalp_match['signal']}</b>, now <b>{ss.signal}</b> — signal changed. Trust latest.",
+                "neutral")
 
-        if ss.reasons:
-            checklist([(r, any(w in r.lower() for w in ["bullish", "above", "bounce", "oversold", "positive", "up candle", "upward"])) for r in ss.reasons])
-
-        st.markdown("#### Trade Setup")
-        t1, t2 = st.columns(2)
+        # --- TRADE SETUP ---
         risk_ps = abs(ss.entry_price - ss.stop_loss)
         rew_ps = abs(ss.target_1 - ss.entry_price)
-        with t1:
-            st.markdown(f"""<div class='setup-card'>
-                <b>📍 Entry:</b> ₹{ss.entry_price:,.2f}<br>
-                <b>🛑 Stop Loss:</b> ₹{ss.stop_loss:,.2f} <span style='color:#ef4444'>(₹{risk_ps:.2f} risk)</span><br>
-                <b>📊 R:R:</b> 1:{ss.risk_reward}
+
+        scalp_qty = st.number_input("Quantity", min_value=1, value=100, step=25, key="scalp_qty")
+        # Always calculate charges — even NO_TRADE has entry/target/SL values to show
+        if ss.signal == "SHORT":
+            buy_p, sell_p = ss.target_1, ss.entry_price
+            buy_p2, sell_p2 = ss.target_2, ss.entry_price
+            sl_buy, sl_sell = ss.stop_loss, ss.entry_price
+        else:  # LONG or NO_TRADE — treat as long for display
+            buy_p, sell_p = ss.entry_price, ss.target_1
+            buy_p2, sell_p2 = ss.entry_price, ss.target_2
+            sl_buy, sl_sell = ss.entry_price, ss.stop_loss
+        t1_charges = calc_angel_one_charges(buy_p, sell_p, scalp_qty)
+        t2_charges = calc_angel_one_charges(buy_p2, sell_p2, scalp_qty)
+        loss_charges = calc_angel_one_charges(sl_buy, sl_sell, scalp_qty)
+
+        t1c, t2c = st.columns(2)
+        with t1c:
+            st.markdown(f"""<div class='setup-card' style='border-left: 3px solid #00d4ff;'>
+                <b>Entry:</b> ₹{ss.entry_price:,.2f}<br>
+                <b>Stop Loss:</b> ₹{ss.stop_loss:,.2f} <span class='loss'>(₹{risk_ps:.2f} risk)</span><br>
+                <b>R:R:</b> 1:{ss.risk_reward}<br>
+                <span class='loss'><b>If stopped:</b> -₹{abs(loss_charges['net_profit']):,.2f} ({scalp_qty} qty)</span>
             </div>""", unsafe_allow_html=True)
-        with t2:
-            st.markdown(f"""<div class='setup-card'>
-                <b>🎯 Target 1:</b> ₹{ss.target_1:,.2f} <span style='color:#10b981'>(+₹{rew_ps:.2f})</span><br>
-                <b>🎯 Target 2:</b> ₹{ss.target_2:,.2f} <span style='color:#10b981'>(+₹{abs(ss.target_2 - ss.entry_price):.2f})</span>
+        with t2c:
+            p1_class = "profit" if t1_charges["net_profit"] > 0 else "loss"
+            p2_class = "profit" if t2_charges["net_profit"] > 0 else "loss"
+            st.markdown(f"""<div class='setup-card' style='border-left: 3px solid #10b981;'>
+                <b>Target 1:</b> ₹{ss.target_1:,.2f} (+₹{rew_ps:.2f}/share)
+                — <span class='{p1_class}'><b>Net ₹{t1_charges['net_profit']:,.2f}</b></span>
+                <span class='charges-dim'>(charges ₹{t1_charges['total_charges']:.2f})</span><br>
+                <b>Target 2:</b> ₹{ss.target_2:,.2f} (+₹{abs(ss.target_2 - ss.entry_price):.2f}/share)
+                — <span class='{p2_class}'><b>Net ₹{t2_charges['net_profit']:,.2f}</b></span>
+                <span class='charges-dim'>(charges ₹{t2_charges['total_charges']:.2f})</span>
             </div>""", unsafe_allow_html=True)
 
-        st.markdown("#### Key Levels")
+        # Paper trade button for scalping
+        if ss.signal in ("LONG", "SHORT"):
+            _sc_position_value = ss.entry_price * scalp_qty
+            _sc_margin_needed = _sc_position_value / 5  # 5x leverage
+            _sc_fund = get_fund_balance("scalp")
+            _sc_fund_active = _sc_fund["initial_capital"] > 0
+            _sc_btn_label = f"📝 Paper Trade — {ss.signal} {ticker}"
+            if _sc_fund_active:
+                _sc_btn_label += f" (₹{_sc_margin_needed:,.0f} margin)"
+            if _sc_fund_active and _sc_fund["available"] < _sc_margin_needed:
+                st.warning(f"Insufficient funds. Need ₹{_sc_margin_needed:,.0f} margin (5× on ₹{_sc_position_value:,.0f}), available ₹{_sc_fund['available']:,.0f}")
+            if st.button(_sc_btn_label, key="scalp_paper_btn", type="secondary"):
+                try:
+                    tid = place_trade(
+                        ticker=ticker,
+                        trade_type="scalp",
+                        direction=ss.signal,
+                        entry_price=ss.entry_price,
+                        stop_loss=ss.stop_loss,
+                        target_1=ss.target_1,
+                        target_2=ss.target_2,
+                        quantity=scalp_qty,
+                        signal_strength=ss.strength,
+                        confidence=ss.confidence,
+                        reasons=", ".join(ss.reasons) if ss.reasons else "",
+                    )
+                    st.success(f"Scalp paper trade #{tid} placed! Entry ₹{ss.entry_price:,.2f} × {scalp_qty} qty")
+                except ValueError as e:
+                    st.error(str(e))
+
+        # --- Key levels row ---
         lv1, lv2, lv3, lv4 = st.columns(4)
         lv1.metric("VWAP", f"₹{levels['vwap']:,.2f}", "Above ↑" if idf["Close"].iloc[-1] > levels["vwap"] else "Below ↓")
         lv2.metric("Pivot", f"₹{levels['pivot']:,.2f}")
         lv3.metric("Today High", f"₹{levels['today_high']:,.2f}")
         lv4.metric("Today Low", f"₹{levels['today_low']:,.2f}")
 
-        with st.expander("Camarilla Levels"):
-            cam = st.columns(6)
-            for i, (l, k) in enumerate(zip(["S3", "S2", "S1", "R1", "R2", "R3"],
-                                            ["cam_s3", "cam_s2", "cam_s1", "cam_r1", "cam_r2", "cam_r3"])):
-                cam[i].metric(l, f"₹{levels[k]:,.2f}")
-
-        # 5-min chart
+        # --- Chart ---
         fig_s = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
         fig_s.add_trace(go.Candlestick(x=idf.index, open=idf["Open"], high=idf["High"], low=idf["Low"], close=idf["Close"], name="Price"), row=1, col=1)
         fig_s.add_trace(go.Scatter(x=idf.index, y=idf["EMA_5"], name="EMA 5", line=dict(width=1, color=C_CYAN)), row=1, col=1)
@@ -792,16 +1311,497 @@ with tab_scalp:
         fig_s.add_hline(y=levels["prev_low"], line_dash="dot", line_color=C_GREEN, annotation_text="Prev Low", row=1, col=1)
         svc = [VOL_UP if c >= o else VOL_DOWN for o, c in zip(idf["Open"], idf["Close"])]
         fig_s.add_trace(go.Bar(x=idf.index, y=idf["Volume"], name="Vol", marker_color=svc, opacity=0.5), row=2, col=1)
-        fig_s.update_layout(height=550, xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02), **CHART_LAYOUT)
+        fig_s.update_layout(height=500, xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02), **CHART_LAYOUT)
         fig_s.update_yaxes(gridcolor="#1e1e35", row=2, col=1)
         st.plotly_chart(fig_s, use_container_width=True)
 
-        with st.expander("Market Conditions"):
+        # --- Collapsible details ---
+        with st.expander("Signal Reasons"):
+            if ss.reasons:
+                checklist([(r, any(w in r.lower() for w in ["bullish", "above", "bounce", "oversold", "positive", "up candle", "upward"])) for r in ss.reasons])
+
+        with st.expander("Camarilla & Market Details"):
+            cam = st.columns(6)
+            for i, (l, k) in enumerate(zip(["S3", "S2", "S1", "R1", "R2", "R3"],
+                                            ["cam_s3", "cam_s2", "cam_s1", "cam_r1", "cam_r2", "cam_r3"])):
+                cam[i].metric(l, f"₹{levels[k]:,.2f}")
             mi1, mi2, mi3, mi4 = st.columns(4)
             mi1.metric("ATR", f"₹{micro['atr']:.2f}")
             mi2.metric("Candle Size", f"{micro['avg_candle_range']:.3f}%")
             mi3.metric("Consecutive", f"{micro['consecutive_candles']} {micro['consecutive_direction']}")
             mi4.metric("Trend Slope", f"{micro['trend_slope']:.4f}")
+
+
+# ========================================================================
+# TAB: PAPER TRADING DASHBOARD
+# ========================================================================
+with tab_paper:
+    # Aggregate stats for the header (all trades)
+    _pt_all_stats = get_paper_stats(None)
+    _pt_swing_stats = get_paper_stats("swing")
+    _pt_scalp_stats = get_paper_stats("scalp")
+
+    # -- Performance summary banner --
+    _pnl = _pt_all_stats["total_pnl"]
+    _pnl_color = "#34d399" if _pnl >= 0 else "#f87171"
+    _pnl_sign = "+" if _pnl >= 0 else ""
+    _total_profit = _pt_all_stats["total_profit"]
+    _total_loss = _pt_all_stats["total_loss"]
+    _wr = _pt_all_stats["win_rate"]
+    _wr_color = "#34d399" if _wr >= 50 else "#f59e0b" if _wr >= 30 else "#f87171"
+
+    # Compute combined funds available
+    _fund_swing = get_fund_balance("swing")
+    _fund_scalp = get_fund_balance("scalp")
+    _any_funds = _fund_swing["initial_capital"] > 0 or _fund_scalp["initial_capital"] > 0
+    _total_available = _fund_swing["available"] + _fund_scalp["available"]
+    _total_deployed = _fund_swing["deployed"] + _fund_scalp["deployed"]
+    _total_initial = _fund_swing["initial_capital"] + _fund_scalp["initial_capital"]
+
+    _funds_html = ""
+    if _any_funds:
+        _funds_html = (
+            f'<div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid #2a2a45;'
+            f' display: flex; gap: 24px; flex-wrap: wrap; align-items: center;">'
+            f'<div>'
+            f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Funds Available</div>'
+            f'<div style="font-size: 22px; font-weight: 800; color: #34d399;">₹{_total_available:,.0f}</div>'
+            f'</div>'
+            f'<div>'
+            f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Deployed</div>'
+            f'<div style="font-size: 22px; font-weight: 800; color: #f59e0b;">₹{_total_deployed:,.0f}</div>'
+            f'</div>'
+            f'<div>'
+            f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Total Capital</div>'
+            f'<div style="font-size: 22px; font-weight: 800; color: #e0e0f0;">₹{_total_initial:,.0f}</div>'
+            f'</div>'
+            f'</div>'
+        )
+
+    st.markdown(f"""<div style="
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a30 100%);
+        border: 1px solid #2a2a45; border-radius: 18px;
+        padding: 28px 32px; margin-bottom: 16px; position: relative; overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+            <div>
+                <div style="font-size: 13px; color: #7777a0; text-transform: uppercase; letter-spacing: 1px; font-weight: 700;">
+                    Paper Trading — Net P&L</div>
+                <div style="font-size: 32px; font-weight: 800; color: {_pnl_color}; margin-top: 4px;">
+                    {_pnl_sign}₹{_pnl:,.2f}</div>
+                <div style="font-size: 13px; color: #8888a8; margin-top: 2px;">
+                    {_pt_all_stats['total_trades']} closed trades | {_pt_all_stats['open_trades']} open</div>
+            </div>
+            <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+                <div style="text-align: center;">
+                    <div style="font-size: 20px; font-weight: 800; color: #34d399;">+₹{_total_profit:,.0f}</div>
+                    <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Total Profit</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 20px; font-weight: 800; color: #f87171;">₹{_total_loss:,.0f}</div>
+                    <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Total Loss</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 20px; font-weight: 800; color: {_wr_color};">{_wr}%</div>
+                    <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Win Rate</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 20px; font-weight: 800; color: #e0e0f0;">{_pt_all_stats['profit_factor']}</div>
+                    <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Profit Factor</div>
+                </div>
+            </div>
+        </div>
+        {_funds_html}
+    </div>""", unsafe_allow_html=True)
+
+    # -- Fund balance cards (per-type breakdown) --
+    if _any_funds:
+        _fc1, _fc2 = st.columns(2)
+
+        def _fund_card(label, fund, accent, border_color, leverage=1):
+            _total = fund["initial_capital"]
+            _avail = fund["available"]
+            _deployed = fund["deployed"]
+            _rpnl = fund["realized_pnl"]
+            _buying_power = _avail * leverage
+            _current_val = _avail + _deployed
+            _return_pct = ((_current_val - _total) / _total * 100) if _total > 0 else 0
+            _ret_color = "#34d399" if _return_pct >= 0 else "#f87171"
+            _ret_sign = "+" if _return_pct >= 0 else ""
+            _util_pct = (_deployed / _total * 100) if _total > 0 else 0
+            _bar_width = min(_util_pct, 100)
+            _rpnl_color = "#34d399" if _rpnl >= 0 else "#f87171"
+            _rpnl_sign = "+" if _rpnl >= 0 else ""
+            _leverage_badge = (
+                f'<span style="font-size: 10px; background: rgba(168,85,247,0.2); color: #a855f7; '
+                f'padding: 2px 6px; border-radius: 4px; margin-left: 6px; font-weight: 600;">'
+                f'{leverage}\u00d7 leverage</span>'
+            ) if leverage > 1 else ""
+            # Build metric cells
+            _cells = (
+                f'<div style="flex: 1; min-width: 90px;">'
+                f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Available</div>'
+                f'<div style="font-size: 18px; font-weight: 800; color: #34d399;">\u20b9{_avail:,.0f}</div></div>'
+            )
+            if leverage > 1:
+                _cells += (
+                    f'<div style="flex: 1; min-width: 90px;">'
+                    f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Buying Power</div>'
+                    f'<div style="font-size: 18px; font-weight: 800; color: #a855f7;">\u20b9{_buying_power:,.0f}</div></div>'
+                )
+            _cells += (
+                f'<div style="flex: 1; min-width: 90px;">'
+                f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Deployed</div>'
+                f'<div style="font-size: 18px; font-weight: 800; color: #f59e0b;">\u20b9{_deployed:,.0f}</div></div>'
+                f'<div style="flex: 1; min-width: 90px;">'
+                f'<div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Realized P&L</div>'
+                f'<div style="font-size: 18px; font-weight: 800; color: {_rpnl_color};">'
+                f'{_rpnl_sign}\u20b9{_rpnl:,.0f}</div></div>'
+            )
+            return (
+                f'<div style="background: linear-gradient(135deg, #12122a, #141432);'
+                f' border: 1px solid {border_color}; border-radius: 14px;'
+                f' padding: 18px 20px; margin-bottom: 12px;">'
+                f'<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">'
+                f'<span style="font-size: 13px; font-weight: 700; color: {accent};'
+                f' text-transform: uppercase; letter-spacing: 1px;">{label}{_leverage_badge}</span>'
+                f'<span style="font-size: 12px; color: {_ret_color}; font-weight: 700;">'
+                f'{_ret_sign}{_return_pct:.1f}% return</span></div>'
+                f'<div style="display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px;">{_cells}</div>'
+                f'<div style="background: rgba(255,255,255,0.05); border-radius: 6px; height: 8px; overflow: hidden;">'
+                f'<div style="background: {accent}; width: {_bar_width}%; height: 100%; border-radius: 6px;'
+                f' transition: width 0.3s;"></div></div>'
+                f'<div style="font-size: 11px; color: #6b6b80; margin-top: 4px;">'
+                f'{_util_pct:.0f}% deployed of \u20b9{_total:,.0f} capital</div></div>'
+            )
+
+        with _fc1:
+            if _fund_swing["initial_capital"] > 0:
+                st.markdown(_fund_card("Swing", _fund_swing, "#00d4ff", "rgba(0,212,255,0.2)"),
+                            unsafe_allow_html=True)
+        with _fc2:
+            if _fund_scalp["initial_capital"] > 0:
+                st.markdown(_fund_card("Scalp", _fund_scalp, "#a855f7", "rgba(168,85,247,0.2)", leverage=5),
+                            unsafe_allow_html=True)
+    else:
+        st.markdown("""<div style="background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.2);
+            border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; color: #f59e0b;">
+            Set your <b>Paper Trading Funds</b> in the sidebar to track capital usage, deployed amounts, and returns.
+        </div>""", unsafe_allow_html=True)
+
+    # -- Detailed stats row --
+    if _pt_all_stats["total_trades"] > 0:
+        _best = _pt_all_stats["best_trade"]
+        _worst = _pt_all_stats["worst_trade"]
+        _avg_pct = _pt_all_stats["avg_pnl_pct"]
+        _avg_pct_c = "#34d399" if _avg_pct >= 0 else "#f87171"
+        st.markdown(f"""<div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 110px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.15);">
+                <div style="font-size: 17px; font-weight: 800; color: #34d399;">+₹{_best:,.0f}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Best Trade</div>
+            </div>
+            <div style="flex: 1; min-width: 110px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.15);">
+                <div style="font-size: 17px; font-weight: 800; color: #f87171;">₹{_worst:,.0f}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Worst Trade</div>
+            </div>
+            <div style="flex: 1; min-width: 110px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(255,255,255,0.03); border: 1px solid #2a2a45;">
+                <div style="font-size: 17px; font-weight: 800; color: {_avg_pct_c};">{"+" if _avg_pct >= 0 else ""}{_avg_pct:.2f}%</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Avg P&L %</div>
+            </div>
+            <div style="flex: 1; min-width: 110px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(255,255,255,0.03); border: 1px solid #2a2a45;">
+                <div style="font-size: 17px; font-weight: 800; color: #e0e0f0;">{_pt_all_stats['wins']}/{_pt_all_stats['losses']}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.5px;">Wins / Losses</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+    # -- Action buttons row --
+    _ptb1, _ptb2, _ptb3 = st.columns([4, 1, 1])
+    with _ptb2:
+        if st.button("Check Trades", type="primary", use_container_width=True, key="pt_check"):
+            result = check_open_trades()
+            if result["updated"]:
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.info(f"Checked {result['checked']} — no changes")
+    with _ptb3:
+        if st.button("Reset All", use_container_width=True, key="pt_reset"):
+            count = clear_all_trades()
+            st.rerun()
+
+    # -- Helper: generate badge HTML for a price level --
+    def _level_badge(label, price_str, is_hit, hit_color="#34d399", pending_color="#555578"):
+        if is_hit:
+            _rgb = "16,185,129" if hit_color == "#34d399" else "239,68,68"
+            return (f"<span style='display:inline-block; padding:4px 12px; border-radius:8px; margin:3px 4px; "
+                    f"font-size:12px; font-weight:700; letter-spacing:0.3px; "
+                    f"background:rgba({_rgb},0.15); "
+                    f"border:1px solid {hit_color}; color:{hit_color};'>"
+                    f"{label} ₹{price_str}</span>")
+        else:
+            return (f"<span style='display:inline-block; padding:4px 12px; border-radius:8px; margin:3px 4px; "
+                    f"font-size:12px; font-weight:600; letter-spacing:0.3px; "
+                    f"background:rgba(255,255,255,0.03); border:1px solid #2a2a4a; color:{pending_color};'>"
+                    f"{label} ₹{price_str}</span>")
+
+    # -- Open positions (PENDING + ACTIVE) --
+    _open_all = get_open_trades(None)
+    if not _open_all.empty:
+        st.markdown("<div class='section-label'>Open Positions</div>", unsafe_allow_html=True)
+        for _, row in _open_all.iterrows():
+            _is_long = row["direction"] in ("BUY", "LONG")
+            _dir_color = "#10b981" if _is_long else "#ef4444"
+            _dir_icon = "▲" if _is_long else "▼"
+            _type_badge = "SWING" if row["trade_type"] == "swing" else "SCALP"
+            _badge_bg = "rgba(0,212,255,0.1)" if row["trade_type"] == "swing" else "rgba(168,85,247,0.1)"
+            _badge_border = "rgba(0,212,255,0.3)" if row["trade_type"] == "swing" else "rgba(168,85,247,0.3)"
+            _badge_color = "#00d4ff" if row["trade_type"] == "swing" else "#a855f7"
+            _opened_short = row["opened_at"][:16].replace("T", " ") if row["opened_at"] else ""
+            _is_active = row.get("status") == "ACTIVE"
+            _status_label = "ACTIVE" if _is_active else "PENDING"
+            _status_color = "#10b981" if _is_active else "#f59e0b"
+            _status_rgb = "16,185,129" if _is_active else "245,158,11"
+
+            # Read hit flags (with fallback for old data)
+            _entry_hit = bool(row.get("entry_hit", 0))
+            _t1_hit = bool(row.get("t1_hit", 0))
+            _t2_hit = bool(row.get("t2_hit", 0))
+            _t3_hit = bool(row.get("t3_hit", 0))
+            _sl_hit = bool(row.get("sl_hit", 0))
+
+            # Build badges
+            _badges = _level_badge("ENTRY", f"{row['entry_price']:,.2f}", _entry_hit, "#00d4ff")
+            _badges += _level_badge("T1", f"{row['target_1']:,.2f}", _t1_hit)
+            if row.get("target_2"):
+                _badges += _level_badge("T2", f"{row['target_2']:,.2f}", _t2_hit)
+            if row.get("target_3"):
+                _badges += _level_badge("T3", f"{row['target_3']:,.2f}", _t3_hit)
+            _badges += _level_badge("SL", f"{row['stop_loss']:,.2f}", _sl_hit, "#ef4444", "#ef4444" if not _sl_hit else "#ef4444")
+
+            st.markdown(f"""<div style="
+                background: linear-gradient(135deg, #12122a, #141432);
+                border: 1px solid #1e1e3a; border-left: 4px solid {_dir_color};
+                border-radius: 14px; padding: 18px 22px; margin-bottom: 10px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 20px; font-weight: 800; color: {_dir_color};">{_dir_icon}</span>
+                        <span style="font-size: 17px; font-weight: 800; color: #e0e0f0;">
+                            {row['ticker'].replace('.NS','')}</span>
+                        <span style="display: inline-block; font-size: 10px; font-weight: 700;
+                            text-transform: uppercase; letter-spacing: 0.8px; padding: 3px 10px;
+                            border-radius: 20px; background: {_badge_bg}; border: 1px solid {_badge_border};
+                            color: {_badge_color};">{_type_badge}</span>
+                        <span style="display: inline-block; font-size: 10px; font-weight: 700;
+                            text-transform: uppercase; letter-spacing: 0.8px; padding: 3px 10px;
+                            border-radius: 20px; background: rgba({_status_rgb},0.1);
+                            border: 1px solid {_status_color}; color: {_status_color};">{_status_label}</span>
+                    </div>
+                    <div style="font-size: 13px; color: #6b6b80;">
+                        Qty {row['quantity']} | ₹{row.get('capital_used', 0) or 0:,.0f} capital | {_opened_short}</div>
+                </div>
+                <div style="margin-top: 14px; display: flex; flex-wrap: wrap; gap: 2px;">
+                    {_badges}
+                </div>
+            </div>""", unsafe_allow_html=True)
+            if _is_active:
+                # Active trade: only close at market
+                if st.button("Close at market price", key=f"close_pt_{row['id']}"):
+                    try:
+                        import yfinance as yf
+                        from src.data_fetcher import _yf_retry
+                        stock = yf.Ticker(row["ticker"])
+                        hist = _yf_retry(lambda: stock.history(period="1d"))
+                        cp = hist["Close"].iloc[-1] if not hist.empty else row["entry_price"]
+                    except Exception:
+                        cp = row["entry_price"]
+                    result = close_trade(row["id"], cp)
+                    if "error" not in result:
+                        st.rerun()
+            else:
+                # Pending trade: close or delete
+                _btn_c1, _btn_c2, _btn_spacer = st.columns([1, 1, 4])
+                with _btn_c1:
+                    if st.button("Close at market", key=f"close_pt_{row['id']}", use_container_width=True):
+                        try:
+                            import yfinance as yf
+                            from src.data_fetcher import _yf_retry
+                            stock = yf.Ticker(row["ticker"])
+                            hist = _yf_retry(lambda: stock.history(period="1d"))
+                            cp = hist["Close"].iloc[-1] if not hist.empty else row["entry_price"]
+                        except Exception:
+                            cp = row["entry_price"]
+                        result = close_trade(row["id"], cp)
+                        if "error" not in result:
+                            st.rerun()
+                with _btn_c2:
+                    if st.button("🗑 Delete", key=f"del_pt_{row['id']}", use_container_width=True, type="secondary"):
+                        result = delete_trade(row["id"])
+                        if "error" not in result:
+                            st.rerun()
+                        else:
+                            st.error(result["error"])
+    elif _pt_all_stats["total_trades"] == 0 and _pt_all_stats["open_trades"] == 0:
+        st.markdown("""<div class="empty-state">
+            <div class="es-icon">📝</div>
+            <div class="es-title">No paper trades yet</div>
+            <div class="es-desc">Go to the <b>Swing</b> or <b>Scalping</b> tab and click
+            <b>Paper Trade</b> on an active signal to start tracking.</div>
+        </div>""", unsafe_allow_html=True)
+
+    # -- Trade history --
+    _hist_all = get_trade_history(None, limit=100)
+    if not _hist_all.empty:
+        st.markdown("<div class='section-label'>Trade History</div>", unsafe_allow_html=True)
+
+        # Outcome summary bar
+        _t_hit = len(_hist_all[_hist_all["status"].str.startswith("HIT")])
+        _t_stop = len(_hist_all[_hist_all["status"] == "STOPPED_OUT"])
+        _t_exp = len(_hist_all[_hist_all["status"] == "EXPIRED"])
+        _t_closed = len(_hist_all[_hist_all["status"] == "CLOSED"])
+
+        st.markdown(f"""<div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 100px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2);">
+                <div style="font-size: 20px; font-weight: 800; color: #34d399;">{_t_hit}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px;">Targets Hit</div>
+            </div>
+            <div style="flex: 1; min-width: 100px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);">
+                <div style="font-size: 20px; font-weight: 800; color: #f87171;">{_t_stop}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px;">Stopped Out</div>
+            </div>
+            <div style="flex: 1; min-width: 100px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2);">
+                <div style="font-size: 20px; font-weight: 800; color: #f59e0b;">{_t_exp}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px;">Expired</div>
+            </div>
+            <div style="flex: 1; min-width: 100px; text-align: center; padding: 12px; border-radius: 10px;
+                background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.2);">
+                <div style="font-size: 20px; font-weight: 800; color: #00d4ff;">{_t_closed}</div>
+                <div style="font-size: 11px; color: #7777a0; text-transform: uppercase; letter-spacing: 0.6px;">Manually Closed</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Trade history cards with badges
+        for _, row in _hist_all.iterrows():
+            _status = row["status"]
+            if _status.startswith("HIT"):
+                _outcome_color = "#34d399"
+                _outcome_bg = "rgba(16,185,129,0.06)"
+                _outcome_border = "rgba(16,185,129,0.25)"
+                _outcome_label = _status.replace("_", " ")
+            elif _status == "STOPPED_OUT":
+                _outcome_color = "#f87171"
+                _outcome_bg = "rgba(239,68,68,0.06)"
+                _outcome_border = "rgba(239,68,68,0.25)"
+                _outcome_label = "STOPPED OUT"
+            elif _status == "EXPIRED":
+                _outcome_color = "#f59e0b"
+                _outcome_bg = "rgba(245,158,11,0.06)"
+                _outcome_border = "rgba(245,158,11,0.25)"
+                _outcome_label = "EXPIRED"
+            else:
+                _outcome_color = "#00d4ff"
+                _outcome_bg = "rgba(0,212,255,0.06)"
+                _outcome_border = "rgba(0,212,255,0.25)"
+                _outcome_label = "CLOSED"
+
+            _pnl_val = row.get("pnl", 0) or 0
+            _pnl_pct = row.get("pnl_pct", 0) or 0
+            _pnl_c = "#34d399" if _pnl_val >= 0 else "#f87171"
+            _pnl_s = "+" if _pnl_val >= 0 else ""
+            _type_badge = "SWING" if row["trade_type"] == "swing" else "SCALP"
+            _badge_color = "#00d4ff" if row["trade_type"] == "swing" else "#a855f7"
+            _opened = (row.get("opened_at") or "")[:10]
+            _closed = (row.get("closed_at") or "")[:10]
+
+            # Build hit badges for history
+            _entry_hit = bool(row.get("entry_hit", 0))
+            _t1_hit = bool(row.get("t1_hit", 0))
+            _t2_hit = bool(row.get("t2_hit", 0))
+            _t3_hit = bool(row.get("t3_hit", 0))
+            _sl_hit = bool(row.get("sl_hit", 0))
+
+            _h_badges = _level_badge("ENTRY", f"{row['entry_price']:,.2f}", _entry_hit, "#00d4ff")
+            _h_badges += _level_badge("T1", f"{row['target_1']:,.2f}", _t1_hit)
+            if row.get("target_2"):
+                _h_badges += _level_badge("T2", f"{row['target_2']:,.2f}", _t2_hit)
+            if row.get("target_3"):
+                _h_badges += _level_badge("T3", f"{row['target_3']:,.2f}", _t3_hit)
+            _h_badges += _level_badge("SL", f"{row['stop_loss']:,.2f}", _sl_hit, "#ef4444")
+
+            st.markdown(f"""<div style="
+                background: {_outcome_bg}; border: 1px solid {_outcome_border};
+                border-radius: 12px; padding: 16px 20px; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 16px; font-weight: 800; color: #e0e0f0;">
+                            {row['ticker'].replace('.NS','')}</span>
+                        <span style="font-size: 10px; font-weight: 700; color: {_badge_color};
+                            text-transform: uppercase; letter-spacing: 0.6px;">{_type_badge}</span>
+                        <span style="font-size: 10px; font-weight: 700; color: {_outcome_color};
+                            text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 8px;
+                            border-radius: 6px; background: {_outcome_bg}; border: 1px solid {_outcome_border};">
+                            {_outcome_label}</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="font-size: 18px; font-weight: 800; color: {_pnl_c};">
+                            {_pnl_s}₹{_pnl_val:,.2f}</span>
+                        <span style="font-size: 13px; color: {_pnl_c}; margin-left: 6px;">
+                            ({_pnl_s}{_pnl_pct:.2f}%)</span>
+                    </div>
+                </div>
+                <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 2px;">
+                    {_h_badges}
+                </div>
+                <div style="display: flex; gap: 20px; margin-top: 8px; font-size: 13px; color: #6b6b80; flex-wrap: wrap;">
+                    <span>Qty {row['quantity']}</span>
+                    <span>₹{row.get('capital_used', 0) or 0:,.0f} capital</span>
+                    <span>{_opened} → {_closed}</span>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+        # Swing vs Scalp comparison
+        if _pt_swing_stats["total_trades"] > 0 and _pt_scalp_stats["total_trades"] > 0:
+            st.markdown("<div class='section-label'>Swing vs Scalp Comparison</div>", unsafe_allow_html=True)
+            _cmp1, _cmp2 = st.columns(2)
+            with _cmp1:
+                _sw_pnl_c = "#34d399" if _pt_swing_stats["total_pnl"] >= 0 else "#f87171"
+                _sw_roi_line = ""
+                if _fund_swing["initial_capital"] > 0:
+                    _sw_roi = _fund_swing["realized_pnl"] / _fund_swing["initial_capital"] * 100
+                    _sw_roi_c = "#34d399" if _sw_roi >= 0 else "#f87171"
+                    _sw_roi_line = f'<div style="font-size: 13px; color: {_sw_roi_c}; margin-top: 4px;">ROI: {"+" if _sw_roi >= 0 else ""}{_sw_roi:.1f}%</div>'
+                st.markdown(f"""<div style="background: linear-gradient(135deg, #12122a, #141432);
+                    border: 1px solid rgba(0,212,255,0.2); border-radius: 14px; padding: 20px; text-align: center;">
+                    <div style="font-size: 13px; font-weight: 700; color: #00d4ff; text-transform: uppercase;
+                        letter-spacing: 1px;">Swing Trading</div>
+                    <div style="font-size: 28px; font-weight: 800; color: {_sw_pnl_c}; margin: 8px 0;">
+                        ₹{_pt_swing_stats['total_pnl']:,.2f}</div>
+                    <div style="font-size: 13px; color: #8888a8;">
+                        {_pt_swing_stats['total_trades']} trades | {_pt_swing_stats['win_rate']}% win rate</div>
+                    {_sw_roi_line}
+                </div>""", unsafe_allow_html=True)
+            with _cmp2:
+                _sc_pnl_c = "#34d399" if _pt_scalp_stats["total_pnl"] >= 0 else "#f87171"
+                _sc_roi_line = ""
+                if _fund_scalp["initial_capital"] > 0:
+                    _sc_roi = _fund_scalp["realized_pnl"] / _fund_scalp["initial_capital"] * 100
+                    _sc_roi_c = "#34d399" if _sc_roi >= 0 else "#f87171"
+                    _sc_roi_line = f'<div style="font-size: 13px; color: {_sc_roi_c}; margin-top: 4px;">ROI: {"+" if _sc_roi >= 0 else ""}{_sc_roi:.1f}%</div>'
+                st.markdown(f"""<div style="background: linear-gradient(135deg, #12122a, #141432);
+                    border: 1px solid rgba(168,85,247,0.2); border-radius: 14px; padding: 20px; text-align: center;">
+                    <div style="font-size: 13px; font-weight: 700; color: #a855f7; text-transform: uppercase;
+                        letter-spacing: 1px;">Scalp Trading</div>
+                    <div style="font-size: 28px; font-weight: 800; color: {_sc_pnl_c}; margin: 8px 0;">
+                        ₹{_pt_scalp_stats['total_pnl']:,.2f}</div>
+                    <div style="font-size: 13px; color: #8888a8;">
+                        {_pt_scalp_stats['total_trades']} trades | {_pt_scalp_stats['win_rate']}% win rate</div>
+                    {_sc_roi_line}
+                </div>""", unsafe_allow_html=True)
 
 
 # ========================================================================
@@ -812,11 +1812,11 @@ with tab_sentiment:
              "<b>Step 2:</b> Copy the prompt and paste it into ChatGPT or Claude. "
              "<b>Step 3:</b> Paste the AI's response back here to see the analysis.")
 
-    sent_col1, sent_col2 = st.columns([1, 1])
+    sent_col1, sent_col2 = st.columns([3, 1])
     with sent_col1:
-        fetch_news_btn = st.button("Step 1: Fetch News & Generate Prompt", type="primary", use_container_width=True)
+        fetch_news_btn = st.button("📰 Step 1: Fetch News & Generate Prompt", type="primary", use_container_width=True)
     with sent_col2:
-        clear_sent = st.button("Clear", use_container_width=True)
+        clear_sent = st.button("🗑️ Clear", use_container_width=True)
 
     if clear_sent:
         for k in ["sentiment_prompt", "sentiment_news", "sentiment_result"]:
@@ -851,20 +1851,23 @@ DETAILS:
             st.session_state["sentiment_prompt"] = prompt
 
     if "sentiment_prompt" in st.session_state:
-        st.markdown("#### Copy this prompt and paste it in ChatGPT or Claude:")
+        st.markdown("#### Step 1 Complete — Copy this prompt:")
         st.markdown(f"<div class='prompt-box'>{st.session_state['sentiment_prompt']}</div>", unsafe_allow_html=True)
         st.code(st.session_state["sentiment_prompt"], language=None)
+        help_box("Copy the prompt above and paste it into <b>ChatGPT</b>, <b>Claude</b>, or any AI chatbot. "
+                 "Then paste the response back below.")
 
         st.markdown("---")
-        st.markdown("#### Step 2: Paste the AI response below:")
+        st.markdown("#### Step 2: Paste the AI's response")
         ai_response = st.text_area(
             "Paste AI response here",
             height=200,
             placeholder="OVERALL: Bullish\nSCORE: 0.6\nSUMMARY: ...\nDETAILS:\n- headline: Bullish\n...",
             key="sentiment_response_input",
+            label_visibility="collapsed",
         )
 
-        if st.button("Step 3: Analyze Response", type="primary", use_container_width=True):
+        if st.button("✨ Step 3: Analyze Response", type="primary", use_container_width=True):
             if ai_response.strip():
                 from src.sentiment import _parse_sentiment_response
                 news = st.session_state.get("sentiment_news", [])
@@ -886,108 +1889,6 @@ DETAILS:
             ds = "good" if d["sentiment"] == "Bullish" else "bad" if d["sentiment"] == "Bearish" else "neutral"
             de = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}.get(d["sentiment"], "⚪")
             verdict_box(f"{de} <b>{d['sentiment']}</b> — {d['headline']}", ds)
-
-
-# ========================================================================
-# TAB 6: PORTFOLIO / WATCHLIST
-# ========================================================================
-with tab_portfolio:
-    help_box("<b>Portfolio Watchlist</b> — Add stocks to track prices and calculate profit/loss. "
-             "Data is stored in your browser session only (lost on refresh).")
-
-    if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = []
-
-    st.markdown("#### Add Stock to Watchlist")
-    wl_c1, wl_c2, wl_c3 = st.columns([2, 1, 1])
-    with wl_c1:
-        wl_options = {f"{name} ({t})": t for t, name in POPULAR_INDIAN_STOCKS.items()}
-        wl_label = st.selectbox("Stock", list(wl_options.keys()), key="wl_stock")
-        wl_ticker = wl_options[wl_label]
-    with wl_c2:
-        wl_buy_price = st.number_input("Buy price (₹)", min_value=0.0, value=0.0, step=1.0,
-                                        help="Enter your buy price to track P&L. Leave 0 to skip.")
-    with wl_c3:
-        wl_qty = st.number_input("Quantity", min_value=0, value=0, step=1,
-                                  help="Number of shares bought")
-
-    if st.button("Add to Watchlist", type="primary"):
-        already = any(w["ticker"] == wl_ticker for w in st.session_state["watchlist"])
-        if already:
-            st.warning("Stock already in watchlist.")
-        else:
-            st.session_state["watchlist"].append({
-                "ticker": wl_ticker,
-                "name": POPULAR_INDIAN_STOCKS.get(wl_ticker, wl_ticker),
-                "buy_price": wl_buy_price if wl_buy_price > 0 else None,
-                "qty": wl_qty if wl_qty > 0 else None,
-            })
-            st.success(f"Added {wl_ticker} to watchlist!")
-            st.rerun()
-
-    if st.session_state["watchlist"]:
-        st.markdown("#### Your Watchlist")
-        total_invested = 0.0
-        total_current = 0.0
-
-        wl_rows = []
-        for item in st.session_state["watchlist"]:
-            try:
-                wl_info = get_stock_info(item["ticker"])
-                cp = wl_info["current_price"]
-                row = {
-                    "Stock": f"{item['name']}",
-                    "Ticker": item["ticker"],
-                    "Price (₹)": f"{cp:,.2f}",
-                }
-                if item["buy_price"] and item["buy_price"] > 0:
-                    pnl_pct = ((cp - item["buy_price"]) / item["buy_price"]) * 100
-                    row["Buy (₹)"] = f"{item['buy_price']:,.2f}"
-                    row["P&L %"] = f"{'🟢' if pnl_pct >= 0 else '🔴'} {pnl_pct:+.2f}%"
-                    if item["qty"] and item["qty"] > 0:
-                        invested = item["buy_price"] * item["qty"]
-                        current = cp * item["qty"]
-                        row["Qty"] = str(item["qty"])
-                        row["Invested (₹)"] = f"{invested:,.0f}"
-                        row["Current (₹)"] = f"{current:,.0f}"
-                        row["P&L (₹)"] = f"{'🟢' if current >= invested else '🔴'} {current - invested:+,.0f}"
-                        total_invested += invested
-                        total_current += current
-                else:
-                    row["Buy (₹)"] = "—"
-                    row["P&L %"] = "—"
-                wl_rows.append(row)
-            except Exception:
-                wl_rows.append({"Stock": item["name"], "Ticker": item["ticker"], "Price (₹)": "Error", "Buy (₹)": "—", "P&L %": "—"})
-
-        st.dataframe(pd.DataFrame(wl_rows), use_container_width=True, hide_index=True)
-
-        if total_invested > 0:
-            st.markdown("#### Portfolio Summary")
-            ps1, ps2, ps3, ps4 = st.columns(4)
-            ps1.metric("Total Invested", f"₹{total_invested:,.0f}")
-            ps2.metric("Current Value", f"₹{total_current:,.0f}")
-            net_pnl = total_current - total_invested
-            net_pct = (net_pnl / total_invested) * 100
-            ps3.metric("Net P&L", f"₹{net_pnl:+,.0f}", f"{net_pct:+.2f}%")
-            ps4.metric("Stocks", str(len(st.session_state["watchlist"])))
-
-            if net_pnl >= 0:
-                verdict_box(f"📈 <b>Portfolio is UP {net_pct:.2f}%</b> — Total gain: ₹{net_pnl:,.0f}", "good")
-            else:
-                verdict_box(f"📉 <b>Portfolio is DOWN {net_pct:.2f}%</b> — Total loss: ₹{abs(net_pnl):,.0f}", "bad")
-
-        # Remove buttons
-        st.markdown("#### Remove Stocks")
-        rm_cols = st.columns(min(len(st.session_state["watchlist"]), 5))
-        for i, item in enumerate(st.session_state["watchlist"]):
-            col_idx = i % 5
-            with rm_cols[col_idx]:
-                if st.button(f"❌ {item['ticker'].replace('.NS','')}", key=f"rm_{item['ticker']}"):
-                    st.session_state["watchlist"] = [w for w in st.session_state["watchlist"] if w["ticker"] != item["ticker"]]
-                    st.rerun()
-    else:
-        st.info("Your watchlist is empty. Add stocks above to start tracking!")
 
 
 # ========================================================================
@@ -1131,6 +2032,14 @@ with tab_screener:
         st.session_state["scan_results"] = scan_results
         st.session_state["scalp_results"] = scalp_results
 
+    if ("scan_results" not in st.session_state or not st.session_state["scan_results"]) and not scan_btn:
+        st.markdown("""<div class="empty-state">
+            <div class="es-icon">🔍</div>
+            <div class="es-title">Ready to scan</div>
+            <div class="es-desc">Click <b>Scan Now</b> to analyze stocks for swing and scalping opportunities.<br>
+            Uses multi-factor scoring (Technical + Momentum + Quality + Sentiment).</div>
+        </div>""", unsafe_allow_html=True)
+
     if "scan_results" in st.session_state and st.session_state["scan_results"]:
         results = st.session_state["scan_results"]
         scalp_res = st.session_state.get("scalp_results", [])
@@ -1140,151 +2049,210 @@ with tab_screener:
         sells = [r for r in results if r["signal"] == "SELL"]
         holds = [r for r in results if r["signal"] == "HOLD"]
 
-        # ── BEST STOCK FOR SWING ──
-        st.markdown("---")
-        st.markdown("### 🏆 Best Stock to Buy")
-        best_swing_col, best_scalp_col = st.columns(2)
-
-        with best_swing_col:
-            st.markdown("#### Swing Trading Pick")
-            if buys:
-                best_sw = buys[0]
-                setup = best_sw.get("setup")
-                action_card(
-                    f"BUY: {best_sw['name']}",
-                    f"₹{best_sw['price']:,.2f} | {best_sw['strength']} | Score: {best_sw.get('composite_score', 0)*100:.0f}%",
-                    "action-buy",
-                )
-                if setup:
-                    st.markdown(f"""
-| | Price |
-|---|---|
-| **Entry** | ₹{setup.entry_price:,.2f} |
-| **Stop Loss** | ₹{setup.stop_loss:,.2f} |
-| **Target 1** | ₹{setup.target_1:,.2f} (R:R {setup.risk_reward_1}) |
-| **Target 2** | ₹{setup.target_2:,.2f} (R:R {setup.risk_reward_2}) |
-| **Target 3** | ₹{setup.target_3:,.2f} (R:R {setup.risk_reward_3}) |
-""")
-                # Signal reasons
-                reasons = best_sw.get("reasons", [])
-                if reasons:
-                    checklist([(r, not any(w in r.lower() for w in ["bearish", "overbought", "below", "downtrend"])) for r in reasons])
-                # Chart patterns
-                patterns = best_sw.get("patterns", [])
-                if patterns:
-                    for p in patterns:
-                        emoji = "🟢" if "bullish" in p["implication"].lower() or "uptrend" in p["implication"].lower() else "🔴" if "bearish" in p["implication"].lower() or "downtrend" in p["implication"].lower() else "🟡"
-                        st.markdown(f"{emoji} **{p['pattern']}** — {p['implication']} ({p['confidence']*100:.0f}% confidence)")
-            else:
-                st.info("No swing BUY signals found in this scan.")
-
-        # ── BEST STOCK FOR SCALPING ──
-        with best_scalp_col:
-            st.markdown("#### Scalping Pick")
-            scalp_longs = [r for r in scalp_res if r["signal"] == "LONG"]
-            if scalp_longs:
-                best_sc = scalp_longs[0]
-                action_card(
-                    f"LONG: {best_sc['name']}",
-                    f"₹{best_sc['price']:,.2f} | {best_sc['strength']} | {best_sc['confidence']*100:.0f}% conf",
-                    "action-buy",
-                )
-                st.markdown(f"""
-| | Price |
-|---|---|
-| **Entry** | ₹{best_sc['entry']:,.2f} |
-| **Stop Loss** | ₹{best_sc['stop_loss']:,.2f} |
-| **Target 1** | ₹{best_sc['target_1']:,.2f} |
-| **Target 2** | ₹{best_sc['target_2']:,.2f} |
-| **Risk:Reward** | {best_sc['risk_reward']} |
-| **VWAP** | ₹{best_sc['vwap']:,.2f} |
-| **Trend** | {best_sc['trend']} |
-| **Volatility** | {best_sc['volatility']} |
-| **Scalpability** | {best_sc['scalpability']}/100 |
-""")
-                reasons = best_sc.get("reasons", [])
-                if reasons:
-                    checklist([(r, not any(w in r.lower() for w in ["bearish", "overbought", "below", "negative", "downward"])) for r in reasons])
-            else:
-                st.info("No scalping LONG signals found. Market may be closed or bearish.")
+        # ── SUMMARY BAR ──
+        total_scanned = len(results)
+        st.markdown(f"""<div class="quick-stats">
+            <div class="quick-stat">
+                <div class="qs-label">Scanned</div>
+                <div class="qs-value">{total_scanned}</div>
+                <div class="qs-delta" style="color: #7777a0;">stocks</div>
+            </div>
+            <div class="quick-stat">
+                <div class="qs-label">Buy Signals</div>
+                <div class="qs-value" style="color: #34d399;">{len(buys)}</div>
+                <div class="qs-delta" style="color: #34d399;">{'🟢' * min(len(buys), 5)}</div>
+            </div>
+            <div class="quick-stat">
+                <div class="qs-label">Sell Signals</div>
+                <div class="qs-value" style="color: #f87171;">{len(sells)}</div>
+                <div class="qs-delta" style="color: #f87171;">{'🔴' * min(len(sells), 5)}</div>
+            </div>
+            <div class="quick-stat">
+                <div class="qs-label">Hold</div>
+                <div class="qs-value" style="color: #fbbf24;">{len(holds)}</div>
+                <div class="qs-delta" style="color: #fbbf24;">{'🟡' * min(len(holds), 5)}</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
 
         # ── TOP SWING OPPORTUNITIES ──
-        st.markdown("---")
-        st.markdown("#### Top Swing Opportunities")
+        st.markdown("#### Top Swing Picks")
         if buys:
             top = buys[:3]
             tc = st.columns(len(top))
             for i, pick in enumerate(top):
                 with tc[i]:
+                    badge = "<span class='badge-best'>Best</span>" if i == 0 else (f"<span class='badge-rank'>#{i+1}</span>" if len(top) > 1 else "")
                     action_card(
-                        f"BUY: {pick['name']}",
-                        f"₹{pick['price']:,.2f} | {pick['strength']} | {pick['confidence']*100:.0f}% conf",
+                        f"BUY: {pick['name']}{badge}",
+                        f"₹{pick['price']:,.2f} | {pick['strength']} | Score: {pick.get('composite_score', 0)*100:.0f}%",
                         "action-buy",
                     )
+                    p_setup = pick.get("setup")
+                    if p_setup:
+                        sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1)
+                        pnl_class = "profit" if sw_ch['net_profit'] > 0 else "loss"
+                        st.markdown(f"""<div class='setup-card'>
+                            <b>Entry:</b> ₹{p_setup.entry_price:,.2f} &nbsp;|&nbsp; <b>SL:</b> ₹{p_setup.stop_loss:,.2f}<br>
+                            <b>T1:</b> ₹{p_setup.target_1:,.2f} (1:{p_setup.risk_reward_1}) &nbsp;|&nbsp;
+                            <b>T2:</b> ₹{p_setup.target_2:,.2f} (1:{p_setup.risk_reward_2})<br>
+                            <span class='{pnl_class}'><b>Net:</b> ₹{sw_ch['net_profit']:.2f}</span>
+                            <span class='charges-dim'>(charges ₹{sw_ch['total_charges']:.2f})</span>
+                        </div>""", unsafe_allow_html=True)
+                    # Action buttons: Paper Trade + Analyse
+                    _sw_pt_col, _sw_link_col = st.columns(2)
+                    with _sw_pt_col:
+                        if st.button("📝 Paper Trade", key=f"scr_sw_pt_{i}", use_container_width=True):
+                            p_setup = pick.get("setup")
+                            if p_setup:
+                                try:
+                                    _tid = place_trade(
+                                        ticker=pick["ticker"], trade_type="swing",
+                                        direction=pick["signal"],
+                                        entry_price=p_setup.entry_price,
+                                        stop_loss=p_setup.stop_loss,
+                                        target_1=p_setup.target_1,
+                                        target_2=p_setup.target_2,
+                                        target_3=p_setup.target_3,
+                                        quantity=1,
+                                        signal_strength=pick["strength"],
+                                        confidence=pick["confidence"],
+                                        reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
+                                    )
+                                    st.success(f"Trade #{_tid} placed!")
+                                except ValueError as e:
+                                    st.error(str(e))
+                            else:
+                                st.warning("No trade setup available")
+                    with _sw_link_col:
+                        st.markdown(
+                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
+                            f'📈 Swing Analysis</a>',
+                            unsafe_allow_html=True,
+                        )
         else:
-            st.info("No BUY signals found in this scan.")
+            st.info("No BUY signals found.")
 
         # ── TOP SCALPING OPPORTUNITIES ──
-        if scalp_res:
-            scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"]
-            if scalp_longs_all:
-                st.markdown("#### Top Scalping Opportunities")
-                top_sc = scalp_longs_all[:3]
-                sc_top_cols = st.columns(len(top_sc))
-                for i, pick in enumerate(top_sc):
-                    with sc_top_cols[i]:
-                        action_card(
-                            f"LONG: {pick['name']}",
-                            f"₹{pick['price']:,.2f} | {pick['strength']} | Scalp {pick['scalpability']}/100",
-                            "action-buy",
+        scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"] if scalp_res else []
+        if scalp_longs_all:
+            st.markdown("#### Top Scalping Picks")
+            top_sc = scalp_longs_all[:3]
+            sc_top_cols = st.columns(len(top_sc))
+            for i, pick in enumerate(top_sc):
+                with sc_top_cols[i]:
+                    badge = "<span class='badge-best'>Best</span>" if i == 0 else (f"<span class='badge-rank'>#{i+1}</span>" if len(top_sc) > 1 else "")
+                    action_card(
+                        f"LONG: {pick['name']}{badge}",
+                        f"₹{pick['price']:,.2f} | {pick['strength']} | Scalp {pick['scalpability']}/100",
+                        "action-buy",
+                    )
+                    sc_ch = calc_angel_one_charges(pick['entry'], pick['target_1'], 1)
+                    pnl_class = "profit" if sc_ch['net_profit'] > 0 else "loss"
+                    st.markdown(f"""<div class='setup-card'>
+                        <b>Entry:</b> ₹{pick['entry']:,.2f} &nbsp;|&nbsp; <b>SL:</b> ₹{pick['stop_loss']:,.2f}<br>
+                        <b>T1:</b> ₹{pick['target_1']:,.2f} &nbsp;|&nbsp; <b>T2:</b> ₹{pick['target_2']:,.2f} &nbsp;|&nbsp; <b>R:R:</b> {pick['risk_reward']}<br>
+                        <span class='{pnl_class}'><b>Net:</b> ₹{sc_ch['net_profit']:.2f}</span>
+                        <span class='charges-dim'>(charges ₹{sc_ch['total_charges']:.2f})</span>
+                    </div>""", unsafe_allow_html=True)
+                    # Action buttons: Paper Trade + Analyse
+                    _sc_pt_col, _sc_link_col = st.columns(2)
+                    with _sc_pt_col:
+                        if st.button("📝 Paper Trade", key=f"scr_sc_pt_{i}", use_container_width=True):
+                            try:
+                                _tid = place_trade(
+                                    ticker=pick["ticker"], trade_type="scalp",
+                                    direction=pick["signal"],
+                                    entry_price=pick["entry"],
+                                    stop_loss=pick["stop_loss"],
+                                    target_1=pick["target_1"],
+                                    target_2=pick["target_2"],
+                                    quantity=1,
+                                    signal_strength=pick["strength"],
+                                    confidence=pick["confidence"],
+                                    reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
+                                )
+                                st.success(f"Trade #{_tid} placed!")
+                            except ValueError as e:
+                                st.error(str(e))
+                    with _sc_link_col:
+                        st.markdown(
+                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=scalp" target="_blank">'
+                            f'⚡ Scalp Analysis</a>',
+                            unsafe_allow_html=True,
                         )
 
         if sells:
-            st.markdown("#### Stocks to Avoid / Sell")
+            st.markdown("#### Stocks to Avoid")
             sell_top = sells[:3]
             sc_cols = st.columns(len(sell_top))
             for i, pick in enumerate(sell_top):
                 with sc_cols[i]:
                     action_card(
                         f"SELL: {pick['name']}",
-                        f"₹{pick['price']:,.2f} | {pick['strength']} | {pick['confidence']*100:.0f}% conf",
+                        f"₹{pick['price']:,.2f} | {pick['strength']}",
                         "action-sell",
                     )
 
         # ── FULL RESULTS TABLES ──
-        st.markdown("#### All Scanned Stocks — Swing Signals")
+        st.markdown("---")
+        st.markdown("#### All Swing Signals")
         help_box("<b>Score</b> = Multi-factor composite (Technical 40% + Momentum 20% + Quality 20% + Sentiment 20%). "
                  "Inspired by BlackRock's SAE methodology.")
         table_rows = []
         for r in results:
             sig_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(r["signal"], "⚪")
+            r_setup = r.get("setup")
+            if r_setup and r["signal"] == "BUY":
+                r_ch = calc_angel_one_charges(r_setup.entry_price, r_setup.target_1, 1)
+                entry_str = f"{r_setup.entry_price:,.2f}"
+                t1_str = f"{r_setup.target_1:,.2f}"
+                sl_str = f"{r_setup.stop_loss:,.2f}"
+                profit_str = f"{r_ch['net_profit']:.2f}"
+            elif r_setup and r["signal"] == "SELL":
+                r_ch = calc_angel_one_charges(r_setup.target_1, r_setup.entry_price, 1)
+                entry_str = f"{r_setup.entry_price:,.2f}"
+                t1_str = f"{r_setup.target_1:,.2f}"
+                sl_str = f"{r_setup.stop_loss:,.2f}"
+                profit_str = f"{r_ch['net_profit']:.2f}"
+            else:
+                entry_str = t1_str = sl_str = profit_str = "—"
             table_rows.append({
                 "Stock": r["name"],
                 "Price (₹)": f"{r['price']:,.2f}",
                 "Signal": f"{sig_emoji} {r['signal']}",
                 "Strength": r["strength"],
+                "Entry (₹)": entry_str,
+                "Target 1 (₹)": t1_str,
+                "SL (₹)": sl_str,
+                "Profit/share (₹)": profit_str,
                 "Score": f"{r.get('composite_score', 0)*100:.0f}%",
-                "RSI": f"{r['rsi']:.0f}",
-                "ADX": f"{r['adx']:.0f}",
-                "Vol Ratio": f"{r['volume_ratio']:.1f}x",
             })
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
         if scalp_res:
-            st.markdown("#### All Scanned Stocks — Scalping Signals")
+            st.markdown("#### All Scalping Signals")
             scalp_table = []
             for r in scalp_res:
                 sig_emoji = {"LONG": "🟢", "SHORT": "🔴", "NO_TRADE": "🟡"}.get(r["signal"], "⚪")
+                if r["signal"] == "LONG":
+                    sc_ch = calc_angel_one_charges(r['entry'], r['target_1'], 1)
+                    profit_str = f"{sc_ch['net_profit']:.2f}"
+                elif r["signal"] == "SHORT":
+                    sc_ch = calc_angel_one_charges(r['target_1'], r['entry'], 1)
+                    profit_str = f"{sc_ch['net_profit']:.2f}"
+                else:
+                    profit_str = "—"
                 scalp_table.append({
                     "Stock": r["name"],
                     "Price (₹)": f"{r['price']:,.2f}",
                     "Signal": f"{sig_emoji} {r['signal']}",
-                    "Strength": r["strength"],
-                    "Confidence": f"{r['confidence']*100:.0f}%",
+                    "Entry (₹)": f"{r['entry']:,.2f}",
+                    "Target 1 (₹)": f"{r['target_1']:,.2f}",
+                    "SL (₹)": f"{r['stop_loss']:,.2f}",
+                    "Profit/share (₹)": profit_str,
                     "R:R": f"{r['risk_reward']}",
                     "Scalpability": f"{r['scalpability']}/100",
                     "Trend": r["trend"],
-                    "Volatility": r["volatility"],
                 })
             st.dataframe(pd.DataFrame(scalp_table), use_container_width=True, hide_index=True)
 
@@ -1601,7 +2569,12 @@ with tab_accuracy:
     tracked = get_tracked_tickers()
 
     if not tracked:
-        st.info("No predictions logged yet. Go to the Predictions tab and run a prediction to start tracking.")
+        st.markdown("""<div class="empty-state">
+            <div class="es-icon">🎯</div>
+            <div class="es-title">No predictions tracked yet</div>
+            <div class="es-desc">Go to the <b>Predictions</b> tab and run a prediction first.<br>
+            Predictions are automatically logged and validated against actual prices.</div>
+        </div>""", unsafe_allow_html=True)
     else:
         acc_col1, acc_col2 = st.columns([1, 3])
         with acc_col1:
@@ -1805,5 +2778,11 @@ with tab_accuracy:
 # FOOTER
 # ============================================================
 st.markdown("""<div class="footer-card">
-    <b>Disclaimer:</b> Educational purposes only. Not financial advice. Markets are risky. Do your own research.
+    <div style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
+        <span style="font-size: 16px;">⚠️</span>
+        <span><b>Disclaimer:</b> Educational purposes only. Not financial advice. Markets are inherently risky — always do your own research before investing.</span>
+    </div>
+    <div style="margin-top: 8px; font-size: 11px; color: #444460;">
+        Built with Streamlit &bull; LSTM + XGBoost AI Models &bull; Data from Yahoo Finance
+    </div>
 </div>""", unsafe_allow_html=True)
