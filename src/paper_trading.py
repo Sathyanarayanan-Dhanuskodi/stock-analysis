@@ -88,6 +88,15 @@ def init_paper_db():
         # Update old OPEN trades to PENDING
         conn.execute("UPDATE paper_trades SET status='PENDING' WHERE status='OPEN'")
 
+    # Migrate: add exit_target column (T1/T2/T3 — which target to close at)
+    try:
+        conn.execute("SELECT exit_target FROM paper_trades LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_target TEXT DEFAULT 'T1'")
+        except sqlite3.OperationalError:
+            pass
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_status ON paper_trades(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_ticker ON paper_trades(ticker, trade_type)")
     conn.commit()
@@ -108,8 +117,13 @@ def place_trade(
     confidence: float = 0.0,
     reasons: str = "",
     notes: str = "",
+    exit_target: str = "T1",
 ) -> int:
-    """Place a new paper trade in PENDING state. Returns the trade ID."""
+    """Place a new paper trade in PENDING state. Returns the trade ID.
+
+    exit_target: which target to auto-close at ('T1', 'T2', or 'T3').
+    Higher targets are still tracked as hit/not-hit for history.
+    """
     now = datetime.now()
     if trade_type == "scalp":
         today_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -144,13 +158,13 @@ def place_trade(
             target_1, target_2, target_3, quantity, capital_used,
             status, entry_hit, t1_hit, t2_hit, t3_hit, sl_hit,
             highest_price, lowest_price, opened_at, expiry_at,
-            signal_strength, confidence, reasons, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            signal_strength, confidence, reasons, notes, exit_target)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ticker, trade_type, direction, entry_price, stop_loss,
             target_1, target_2, target_3, quantity, capital_used,
             entry_price, entry_price, now.isoformat(), expiry.isoformat(),
-            signal_strength, confidence, reasons, notes,
+            signal_strength, confidence, reasons, notes, exit_target,
         ),
     )
     conn.commit()
@@ -174,7 +188,7 @@ def check_open_trades() -> dict:
         "SELECT id, ticker, trade_type, direction, entry_price, stop_loss, "
         "target_1, target_2, target_3, quantity, highest_price, lowest_price, "
         "expiry_at, opened_at, status, entry_hit, t1_hit, t2_hit, t3_hit, sl_hit, "
-        "capital_used "
+        "capital_used, exit_target "
         "FROM paper_trades WHERE status IN ('PENDING', 'ACTIVE')"
     ).fetchall()
 
@@ -216,7 +230,8 @@ def check_open_trades() -> dict:
              t1, t2, t3, qty, peak, trough,
              expiry_str, opened_at_str, status,
              entry_hit, t1_hit, t2_hit, t3_hit, sl_hit,
-             cap_used) = row
+             cap_used, exit_tgt) = row
+            exit_tgt = exit_tgt or "T1"
 
             is_long = direction in ("BUY", "LONG")
             opened_today = opened_at_str and opened_at_str[:10] == today_str
@@ -303,6 +318,7 @@ def check_open_trades() -> dict:
                     changed = True
 
             # Check targets in order (T1 → T2 → T3), only if not stopped out
+            # All targets are tracked for history, but trade closes at exit_target
             if new_status != "STOPPED_OUT":
                 if not t1_hit:
                     t1_triggered = (check_high >= t1) if is_long else (check_low <= t1)
@@ -334,20 +350,18 @@ def check_open_trades() -> dict:
                             (now_iso, tid),
                         )
 
-            # Determine final status for closed trades
+            # Determine final status — close at the user's chosen exit_target
             if new_status == "STOPPED_OUT":
                 final_price = sl
-            elif t3_hit:
-                new_status = "HIT_T3"
-                final_price = t3
-            elif t2_hit and not t3:
-                # T2 is the last target
-                new_status = "HIT_T2"
-                final_price = t2
-            elif t1_hit and not t2:
-                # T1 is the last target
+            elif exit_tgt == "T1" and t1_hit:
                 new_status = "HIT_T1"
                 final_price = t1
+            elif exit_tgt == "T2" and t2_hit:
+                new_status = "HIT_T2"
+                final_price = t2
+            elif exit_tgt == "T3" and t3_hit:
+                new_status = "HIT_T3"
+                final_price = t3
 
             # Check expiry for active trades
             if final_price is None and expiry_str:
@@ -366,10 +380,12 @@ def check_open_trades() -> dict:
                 conn.execute(
                     """UPDATE paper_trades
                        SET status=?, closed_price=?, pnl=?, pnl_pct=?,
-                           sl_hit=?, highest_price=?, lowest_price=?, closed_at=?
+                           t1_hit=?, t2_hit=?, t3_hit=?, sl_hit=?,
+                           highest_price=?, lowest_price=?, closed_at=?
                        WHERE id=?""",
                     (new_status, final_price, round(pnl, 2), round(pnl_pct, 2),
-                     sl_hit, new_peak, new_trough, now_iso, tid),
+                     t1_hit, t2_hit, t3_hit, sl_hit,
+                     new_peak, new_trough, now_iso, tid),
                 )
                 updates.append({
                     "id": tid, "ticker": ticker, "status": new_status,

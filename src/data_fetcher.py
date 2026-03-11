@@ -162,9 +162,12 @@ def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.Da
 def get_stock_info(ticker: str) -> dict:
     """Get basic stock information."""
     stock = yf.Ticker(ticker)
-    info = _yf_retry(lambda: stock.info)
+    try:
+        info = _yf_retry(lambda: stock.info) or {}
+    except Exception:
+        info = {}
     return {
-        "name": info.get("longName", ticker),
+        "name": info.get("longName", ticker.replace(".NS", "")),
         "sector": info.get("sector", "N/A"),
         "industry": info.get("industry", "N/A"),
         "market_cap": info.get("marketCap", 0),
