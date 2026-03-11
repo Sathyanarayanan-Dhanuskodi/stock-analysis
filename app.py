@@ -11,6 +11,7 @@ from src.data_fetcher import (
     get_sector_for_stock,
 )
 from src.hedge_trading import calculate_correlation_matrix, calculate_sharpe_ratio
+from src.charges import calc_angel_one_charges
 from src.feature_engineering import add_technical_indicators
 from src.predictor import train_and_predict, predict_with_saved_model
 # sentiment imports done inline where needed (src.sentiment._parse_sentiment_response)
@@ -1035,49 +1036,6 @@ def checklist(items: list[tuple[str, bool]]):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def calc_angel_one_charges(buy_price: float, sell_price: float, qty: int = 1) -> dict:
-    """Calculate Angel One brokerage and net profit for a trade.
-
-    Charges: lower of ₹20 or 0.1% per executed order, minimum ₹5.
-    Additional charges: STT, exchange txn, SEBI, stamp duty, GST.
-    """
-    buy_value = buy_price * qty
-    sell_value = sell_price * qty
-    turnover = buy_value + sell_value
-
-    # Brokerage: min(₹20, 0.1% of order value), minimum ₹5 per side
-    buy_brokerage = max(5, min(20, buy_value * 0.001))
-    sell_brokerage = max(5, min(20, sell_value * 0.001))
-    total_brokerage = buy_brokerage + sell_brokerage
-
-    # STT: 0.025% on sell side (intraday equity)
-    stt = sell_value * 0.00025
-
-    # Exchange transaction: 0.00345% on turnover (NSE)
-    exchange_txn = turnover * 0.0000345
-
-    # SEBI charges: ₹10 per crore
-    sebi = turnover * 0.000001
-
-    # Stamp duty: 0.003% on buy side
-    stamp_duty = buy_value * 0.00003
-
-    # GST: 18% on (brokerage + exchange txn + SEBI)
-    gst = (total_brokerage + exchange_txn + sebi) * 0.18
-
-    total_charges = total_brokerage + stt + exchange_txn + sebi + stamp_duty + gst
-    gross_profit = (sell_price - buy_price) * qty
-    net_profit = gross_profit - total_charges
-
-    return {
-        "gross_profit": round(gross_profit, 2),
-        "total_charges": round(total_charges, 2),
-        "net_profit": round(net_profit, 2),
-        "brokerage": round(total_brokerage, 2),
-        "stt": round(stt, 2),
-        "gst": round(gst, 2),
-        "other": round(exchange_txn + sebi + stamp_duty, 2),
-    }
 
 
 def interpret_rsi(rsi):
@@ -1504,27 +1462,29 @@ if st.session_state["page"] == "analysis":
             </div>""", unsafe_allow_html=True)
 
         with sw_sig_right:
-            # Trade Setup + Targets + Paper Trade cards
-            swing_qty = 10  # default, updated by Paper Trade input below
+            # Quantity input first so charges reflect user selection
+            swing_qty = st.number_input(
+                "Quantity", min_value=1, value=10, step=5, key="swing_qty_trade")
+            _sw_capital_needed = setup.entry_price * swing_qty
 
             if signal.signal == "SELL":
                 sw_t1 = calc_angel_one_charges(
-                    setup.target_1, setup.entry_price, swing_qty)
+                    setup.target_1, setup.entry_price, swing_qty, "delivery")
                 sw_t2 = calc_angel_one_charges(
-                    setup.target_2, setup.entry_price, swing_qty)
+                    setup.target_2, setup.entry_price, swing_qty, "delivery")
                 sw_t3 = calc_angel_one_charges(
-                    setup.target_3, setup.entry_price, swing_qty)
+                    setup.target_3, setup.entry_price, swing_qty, "delivery")
                 sw_sl = calc_angel_one_charges(
-                    setup.stop_loss, setup.entry_price, swing_qty)
+                    setup.stop_loss, setup.entry_price, swing_qty, "delivery")
             else:
                 sw_t1 = calc_angel_one_charges(
-                    setup.entry_price, setup.target_1, swing_qty)
+                    setup.entry_price, setup.target_1, swing_qty, "delivery")
                 sw_t2 = calc_angel_one_charges(
-                    setup.entry_price, setup.target_2, swing_qty)
+                    setup.entry_price, setup.target_2, swing_qty, "delivery")
                 sw_t3 = calc_angel_one_charges(
-                    setup.entry_price, setup.target_3, swing_qty)
+                    setup.entry_price, setup.target_3, swing_qty, "delivery")
                 sw_sl = calc_angel_one_charges(
-                    setup.entry_price, setup.stop_loss, swing_qty)
+                    setup.entry_price, setup.stop_loss, swing_qty, "delivery")
 
             _sw_risk_ps = abs(setup.entry_price - setup.stop_loss)
             t1_cls = "profit" if sw_t1["net_profit"] > 0 else "loss"
@@ -1546,6 +1506,10 @@ if st.session_state["page"] == "analysis":
                     <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Risk per share</span>
                     <span style="font-size: 13px; font-weight: 700; color: #e8e4de; font-family: var(--mono);">₹{_sw_risk_ps:,.2f} (1:{setup.risk_reward_1})</span>
                 </div>
+                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
+                    <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Amount needed ({swing_qty} qty)</span>
+                    <span style="font-size: 13px; font-weight: 700; color: #d4a054; font-family: var(--mono);">₹{_sw_capital_needed:,.2f}</span>
+                </div>
                 <div style="background: rgba(212,93,93,0.08); border: 1px solid rgba(212,93,93,0.1); border-radius: 6px; padding: 6px 10px; margin-top: 8px; text-align: center;">
                     <span style="font-size: 12px; color: #d45d5d; font-family: var(--mono);">If stopped ({swing_qty} qty): -₹{abs(sw_sl['net_profit']):,.2f}</span>
                 </div>
@@ -1559,7 +1523,7 @@ if st.session_state["page"] == "analysis":
                     <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{setup.target_1:,.2f}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0;">
-                    <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(setup.target_1 - setup.entry_price):,.2f}/share</span>
+                    <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(setup.target_1 - setup.entry_price):,.2f}/share × {swing_qty}</span>
                     <span style="font-size: 11px; color: rgba(255,255,255,0.28);">Net: <span class='{t1_cls}' style="font-size: 11px;">₹{sw_t1['net_profit']:,.2f}</span> <span style="color: rgba(255,255,255,0.2);">(charges ₹{sw_t1['total_charges']:.2f})</span></span>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
@@ -1567,7 +1531,7 @@ if st.session_state["page"] == "analysis":
                     <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{setup.target_2:,.2f}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0;">
-                    <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(setup.target_2 - setup.entry_price):,.2f}/share</span>
+                    <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(setup.target_2 - setup.entry_price):,.2f}/share × {swing_qty}</span>
                     <span style="font-size: 11px; color: rgba(255,255,255,0.28);">Net: <span class='{t2_cls}' style="font-size: 11px;">₹{sw_t2['net_profit']:,.2f}</span> <span style="color: rgba(255,255,255,0.2);">(charges ₹{sw_t2['total_charges']:.2f})</span></span>
                 </div>
             </div>""", unsafe_allow_html=True)
@@ -1576,9 +1540,6 @@ if st.session_state["page"] == "analysis":
             if signal.signal in ("BUY", "SELL"):
                 with st.container(border=True):
                     st.markdown("""<div style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 4px;">Paper Trade</div>""", unsafe_allow_html=True)
-                    swing_qty = st.number_input(
-                        "Quantity", min_value=1, value=10, step=5, key="swing_qty_trade")
-                    _sw_capital_needed = setup.entry_price * swing_qty
                     _sw_fund = get_fund_balance("swing")
                     _sw_fund_active = _sw_fund["initial_capital"] > 0
                     _sw_exit_opts = [f"Target 1 — ₹{setup.target_1:,.1f}"]
@@ -1872,7 +1833,10 @@ if st.session_state["page"] == "analysis":
                 </div>""", unsafe_allow_html=True)
 
             with sc_sig_right:
-                scalp_qty = 100  # default, updated by Paper Trade input below
+                scalp_qty = st.number_input(
+                    "Quantity", min_value=1, value=100, step=25, key="scalp_qty_trade")
+                _sc_position_value = ss.entry_price * scalp_qty
+                _sc_margin_needed = _sc_position_value / 5  # 5x leverage
                 # Calculate charges
                 if ss.signal == "SHORT":
                     buy_p, sell_p = ss.target_1, ss.entry_price
@@ -1904,6 +1868,14 @@ if st.session_state["page"] == "analysis":
                         <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Risk per share</span>
                         <span style="font-size: 13px; font-weight: 700; color: #e8e4de; font-family: var(--mono);">₹{risk_ps:,.2f} (1:{ss.risk_reward})</span>
                     </div>
+                    <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
+                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Amount needed ({scalp_qty} qty)</span>
+                        <span style="font-size: 13px; font-weight: 700; color: #d4a054; font-family: var(--mono);">₹{_sc_position_value:,.2f}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
+                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Margin (5x leverage)</span>
+                        <span style="font-size: 13px; font-weight: 700; color: #d4a054; font-family: var(--mono);">₹{_sc_margin_needed:,.2f}</span>
+                    </div>
                     <div style="background: rgba(212,93,93,0.08); border: 1px solid rgba(212,93,93,0.1); border-radius: 6px; padding: 6px 10px; margin-top: 8px; text-align: center;">
                         <span style="font-size: 12px; color: #d45d5d; font-family: var(--mono);">If stopped ({scalp_qty} qty): -₹{abs(loss_charges['net_profit']):,.2f}</span>
                     </div>
@@ -1917,7 +1889,7 @@ if st.session_state["page"] == "analysis":
                         <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{ss.target_1:,.2f}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
-                        <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{rew_ps:.2f}/share</span>
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{rew_ps:.2f}/share × {scalp_qty}</span>
                         <span style="font-size: 11px; color: rgba(255,255,255,0.28);">Net: <span class='{p1_class}' style="font-size: 11px;">₹{t1_charges['net_profit']:,.2f}</span> <span style="color: rgba(255,255,255,0.2);">(charges ₹{t1_charges['total_charges']:.2f})</span></span>
                     </div>
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
@@ -1925,7 +1897,7 @@ if st.session_state["page"] == "analysis":
                         <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{ss.target_2:,.2f}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0;">
-                        <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(ss.target_2 - ss.entry_price):.2f}/share</span>
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.28);">+₹{abs(ss.target_2 - ss.entry_price):.2f}/share × {scalp_qty}</span>
                         <span style="font-size: 11px; color: rgba(255,255,255,0.28);">Net: <span class='{p2_class}' style="font-size: 11px;">₹{t2_charges['net_profit']:,.2f}</span> <span style="color: rgba(255,255,255,0.2);">(charges ₹{t2_charges['total_charges']:.2f})</span></span>
                     </div>
                 </div>""", unsafe_allow_html=True)
@@ -1935,10 +1907,6 @@ if st.session_state["page"] == "analysis":
                     with st.container(border=True):
                         st.markdown(
                             """<div style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 4px;">Paper Trade</div>""", unsafe_allow_html=True)
-                        scalp_qty = st.number_input(
-                            "Quantity", min_value=1, value=100, step=25, key="scalp_qty_trade")
-                        _sc_position_value = ss.entry_price * scalp_qty
-                        _sc_margin_needed = _sc_position_value / 5  # 5x leverage
                         _sc_fund = get_fund_balance("scalp")
                         _sc_fund_active = _sc_fund["initial_capital"] > 0
                         _sc_exit_opts = [f"Target 1 — ₹{ss.target_1:,.1f}"]
@@ -2055,6 +2023,7 @@ if st.session_state["page"] == "home":
         _pnl_sign = "+" if _pnl >= 0 else ""
         _total_profit = _pt_all_stats["total_profit"]
         _total_loss = _pt_all_stats["total_loss"]
+        _total_charges = _pt_all_stats.get("total_charges", 0)
         _wr = _pt_all_stats["win_rate"]
         _wr_color = "#5eb88a" if _wr >= 50 else "#d4a054" if _wr >= 30 else "#d45d5d"
 
@@ -2116,6 +2085,10 @@ if st.session_state["page"] == "home":
                     <div style="text-align: center;">
                         <div style="font-size: 20px; font-weight: 800; color: #e8e4de;">{_pt_all_stats['profit_factor']}</div>
                         <div style="font-size: 11px; color: rgba(255,255,255,0.45); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Profit Factor</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 20px; font-weight: 800; color: rgba(255,255,255,0.55);">₹{_total_charges:,.0f}</div>
+                        <div style="font-size: 11px; color: rgba(255,255,255,0.45); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;">Total Charges</div>
                     </div>
                 </div>
             </div>
@@ -2429,7 +2402,9 @@ if st.session_state["page"] == "home":
                     _outcome_border = "rgba(212,160,84,0.2)"
                     _outcome_label = "CLOSED"
 
-                _pnl_val = row.get("pnl", 0) or 0
+                _gross_pnl = row.get("pnl", 0) or 0
+                _charges_val = row.get("charges", 0) or 0
+                _pnl_val = round(_gross_pnl - _charges_val, 2)  # net P&L
                 _pnl_pct = row.get("pnl_pct", 0) or 0
                 _pnl_c = "#5eb88a" if _pnl_val >= 0 else "#d45d5d"
                 _pnl_s = "+" if _pnl_val >= 0 else ""
@@ -2484,6 +2459,7 @@ if st.session_state["page"] == "home":
                                 {_pnl_s}₹{_pnl_val:,.2f}</span>
                             <span style="font-size: 13px; color: {_pnl_c}; margin-left: 6px;">
                                 ({_pnl_s}{_pnl_pct:.2f}%)</span>
+                            {f'<div style="font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 2px;">charges ₹{_charges_val:.2f}</div>' if _charges_val else ''}
                         </div>
                     </div>
                     <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 2px;">
@@ -2882,7 +2858,7 @@ if st.session_state["page"] == "home":
                     # Profit & charges
                     _sw_profit_html = ""
                     if p_setup:
-                        _sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1)
+                        _sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1, "delivery")
                         _sw_np = _sw_ch["net_profit"]
                         _sw_np_color = "#5eb88a" if _sw_np > 0 else "#d45d5d"
                         _sw_np_sign = "+" if _sw_np > 0 else ""
@@ -3098,14 +3074,14 @@ if st.session_state["page"] == "home":
                 r_setup = r.get("setup")
                 if r_setup and r["signal"] == "BUY":
                     r_ch = calc_angel_one_charges(
-                        r_setup.entry_price, r_setup.target_1, 1)
+                        r_setup.entry_price, r_setup.target_1, 1, "delivery")
                     entry_str = f"{r_setup.entry_price:,.2f}"
                     t1_str = f"{r_setup.target_1:,.2f}"
                     sl_str = f"{r_setup.stop_loss:,.2f}"
                     profit_str = f"{r_ch['net_profit']:.2f}"
                 elif r_setup and r["signal"] == "SELL":
                     r_ch = calc_angel_one_charges(
-                        r_setup.target_1, r_setup.entry_price, 1)
+                        r_setup.target_1, r_setup.entry_price, 1, "delivery")
                     entry_str = f"{r_setup.entry_price:,.2f}"
                     t1_str = f"{r_setup.target_1:,.2f}"
                     sl_str = f"{r_setup.stop_loss:,.2f}"

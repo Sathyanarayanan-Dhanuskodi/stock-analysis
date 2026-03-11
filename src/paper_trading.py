@@ -15,6 +15,7 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
+from src.charges import calc_angel_one_charges
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "paper_trades.db"
 
@@ -97,8 +98,39 @@ def init_paper_db():
         except sqlite3.OperationalError:
             pass
 
+    # Migrate: add charges column to store actual brokerage+taxes per trade
+    try:
+        conn.execute("SELECT charges FROM paper_trades LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN charges REAL")
+        except sqlite3.OperationalError:
+            pass
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_status ON paper_trades(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_ticker ON paper_trades(ticker, trade_type)")
+    conn.commit()
+    conn.close()
+
+    # Backfill charges for existing closed trades that have no charges recorded
+    _migrate_charges()
+
+
+def _migrate_charges():
+    """Backfill the charges column for existing closed trades."""
+    conn = _get_conn()
+    trades = conn.execute(
+        "SELECT id, trade_type, direction, entry_price, closed_price, quantity "
+        "FROM paper_trades WHERE status NOT IN ('PENDING', 'ACTIVE') "
+        "AND closed_price IS NOT NULL AND charges IS NULL"
+    ).fetchall()
+    for tid, tt, direction, entry, closed, qty in trades:
+        is_long = direction in ("BUY", "LONG")
+        charge_type = "delivery" if tt == "swing" else "intraday"
+        buy_p = entry if is_long else closed
+        sell_p = closed if is_long else entry
+        ch = calc_angel_one_charges(buy_p, sell_p, qty, charge_type)
+        conn.execute("UPDATE paper_trades SET charges=? WHERE id=?", (ch["total_charges"], tid))
     conn.commit()
     conn.close()
 
@@ -377,22 +409,29 @@ def check_open_trades() -> dict:
             if final_price is not None:
                 pnl = ((final_price - entry) if is_long else (entry - final_price)) * qty
                 pnl_pct = (pnl / (entry * qty)) * 100
+                charge_type = "delivery" if trade_type == "swing" else "intraday"
+                buy_p = entry if is_long else final_price
+                sell_p = final_price if is_long else entry
+                ch = calc_angel_one_charges(buy_p, sell_p, qty, charge_type)
+                charges = ch["total_charges"]
+                net_pnl = round(pnl - charges, 2)
                 conn.execute(
                     """UPDATE paper_trades
-                       SET status=?, closed_price=?, pnl=?, pnl_pct=?,
+                       SET status=?, closed_price=?, pnl=?, pnl_pct=?, charges=?,
                            t1_hit=?, t2_hit=?, t3_hit=?, sl_hit=?,
                            highest_price=?, lowest_price=?, closed_at=?
                        WHERE id=?""",
-                    (new_status, final_price, round(pnl, 2), round(pnl_pct, 2),
+                    (new_status, final_price, round(pnl, 2), round(pnl_pct, 2), charges,
                      t1_hit, t2_hit, t3_hit, sl_hit,
                      new_peak, new_trough, now_iso, tid),
                 )
                 updates.append({
                     "id": tid, "ticker": ticker, "status": new_status,
                     "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
+                    "charges": charges, "net_pnl": net_pnl,
                 })
                 if cap_used:
-                    fund_releases.append((trade_type, cap_used, round(pnl, 2)))
+                    fund_releases.append((trade_type, cap_used, net_pnl))
             elif changed:
                 conn.execute(
                     "UPDATE paper_trades SET status=?, highest_price=?, lowest_price=? WHERE id=?",
@@ -434,25 +473,35 @@ def close_trade(trade_id: int, close_price: float) -> dict:
     if entry_hit:
         pnl = ((close_price - entry) if is_long else (entry - close_price)) * qty
         pnl_pct = (pnl / (entry * qty)) * 100
+        charge_type = "delivery" if trade_type == "swing" else "intraday"
+        buy_p = entry if is_long else close_price
+        sell_p = close_price if is_long else entry
+        ch = calc_angel_one_charges(buy_p, sell_p, qty, charge_type)
+        charges = ch["total_charges"]
+        net_pnl = round(pnl - charges, 2)
     else:
         pnl = 0
         pnl_pct = 0
+        charges = 0.0
+        net_pnl = 0.0
 
     conn.execute(
         """UPDATE paper_trades
-           SET status='CLOSED', closed_price=?, pnl=?, pnl_pct=?, closed_at=?
+           SET status='CLOSED', closed_price=?, pnl=?, pnl_pct=?, charges=?, closed_at=?
            WHERE id=?""",
-        (close_price, round(pnl, 2), round(pnl_pct, 2), datetime.now().isoformat(), trade_id),
+        (close_price, round(pnl, 2), round(pnl_pct, 2), charges,
+         datetime.now().isoformat(), trade_id),
     )
     conn.commit()
     conn.close()
 
-    # Release funds back
+    # Release funds back using net P&L (after charges)
     fund_bal = get_fund_balance(trade_type)
     if fund_bal["initial_capital"] > 0 and capital_used:
-        release_funds(trade_type, capital_used, round(pnl, 2))
+        release_funds(trade_type, capital_used, net_pnl)
 
-    return {"id": trade_id, "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2)}
+    return {"id": trade_id, "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
+            "charges": charges, "net_pnl": net_pnl}
 
 
 def delete_trade(trade_id: int) -> dict:
@@ -525,22 +574,24 @@ def get_paper_stats(trade_type: str | None = None) -> dict:
         where += " AND trade_type = ?"
         params.append(trade_type)
 
+    # Use net P&L (pnl - charges) for all statistics; fall back to gross if charges is NULL
     row = conn.execute(
         f"""SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
-                SUM(pnl) as total_pnl,
+                SUM(CASE WHEN (pnl - COALESCE(charges,0)) > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN (pnl - COALESCE(charges,0)) <= 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl - COALESCE(charges,0)) as total_pnl,
                 AVG(pnl_pct) as avg_pnl_pct,
-                MAX(pnl) as best_trade,
-                MIN(pnl) as worst_trade,
+                MAX(pnl - COALESCE(charges,0)) as best_trade,
+                MIN(pnl - COALESCE(charges,0)) as worst_trade,
                 SUM(CASE WHEN status LIKE 'HIT_T%%' THEN 1 ELSE 0 END) as targets_hit,
                 SUM(CASE WHEN status = 'STOPPED_OUT' THEN 1 ELSE 0 END) as stopped_out,
                 SUM(CASE WHEN status = 'EXPIRED' THEN 1 ELSE 0 END) as expired,
-                AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
-                AVG(CASE WHEN pnl <= 0 THEN pnl END) as avg_loss,
-                SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as total_profit,
-                SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END) as total_loss
+                AVG(CASE WHEN (pnl - COALESCE(charges,0)) > 0 THEN (pnl - COALESCE(charges,0)) END) as avg_win,
+                AVG(CASE WHEN (pnl - COALESCE(charges,0)) <= 0 THEN (pnl - COALESCE(charges,0)) END) as avg_loss,
+                SUM(CASE WHEN (pnl - COALESCE(charges,0)) > 0 THEN (pnl - COALESCE(charges,0)) ELSE 0 END) as total_profit,
+                SUM(CASE WHEN (pnl - COALESCE(charges,0)) < 0 THEN (pnl - COALESCE(charges,0)) ELSE 0 END) as total_loss,
+                SUM(COALESCE(charges,0)) as total_charges
            FROM paper_trades {where}""",
         params,
     ).fetchone()
@@ -570,9 +621,10 @@ def get_paper_stats(trade_type: str | None = None) -> dict:
         "wins": wins,
         "losses": losses,
         "win_rate": round(win_rate, 1),
-        "total_pnl": round(row[3] or 0, 2),
+        "total_pnl": round(row[3] or 0, 2),       # net P&L after charges
         "total_profit": round(row[12] or 0, 2),
         "total_loss": round(row[13] or 0, 2),
+        "total_charges": round(row[14] or 0, 2),  # total charges paid
         "avg_pnl_pct": round(row[4] or 0, 2),
         "best_trade": round(row[5] or 0, 2),
         "worst_trade": round(row[6] or 0, 2),
