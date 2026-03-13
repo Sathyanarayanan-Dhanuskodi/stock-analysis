@@ -438,17 +438,25 @@ def calculate_trade_setup(
         risk = entry_price - stop_loss
 
         target_1 = entry_price + 1.5 * risk
-        # Use nearest resistance or Fibonacci extension
+        # Use nearest resistance or Fibonacci extension — but cap at 4:1 R:R
         extensions = sorted(fib_data["extensions"].values())
-        target_2 = next((e for e in extensions if e > entry_price), entry_price + 2 * risk)
-        target_3 = sr_data["nearest_resistance"] if sr_data["nearest_resistance"] > target_2 else entry_price + 3 * risk
+        fib_t2 = next((e for e in extensions if e > entry_price), entry_price + 2 * risk)
+        target_2 = min(fib_t2, entry_price + 3 * risk)   # cap at 3:1
+        sr_t3 = sr_data["nearest_resistance"] if sr_data["nearest_resistance"] > target_2 else entry_price + 3 * risk
+        target_3 = min(sr_t3, entry_price + 4 * risk)    # cap at 4:1
+        # Ensure strict progression: T2 > T1 > entry, T3 > T2
+        target_2 = max(target_2, target_1 + 0.5 * risk)
+        target_3 = max(target_3, target_2 + 0.5 * risk)
     elif signal.signal == "SELL":
         stop_loss = entry_price + atr_data["current_atr"] * 2
         risk = stop_loss - entry_price
 
         target_1 = entry_price - 1.5 * risk
-        target_2 = sr_data["nearest_support"]
+        # Cap at 4:1 R:R and ensure progression
+        target_2 = max(sr_data["nearest_support"], entry_price - 3 * risk)
         target_3 = entry_price - 3 * risk
+        target_2 = min(target_2, target_1 - 0.5 * risk)  # ensure T2 < T1
+        target_3 = min(target_3, target_2 - 0.5 * risk)  # ensure T3 < T2
     else:  # HOLD
         stop_loss = atr_data["stop_loss_standard"]
         risk = abs(entry_price - stop_loss)

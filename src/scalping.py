@@ -413,34 +413,46 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     else:
         signal, strength = "NO_TRADE", "Weak"
 
-    # Use the best actionable price from multiple sources (S/R, VWAP, EMA, BB).
-    # Adapts based on market condition: trending uses pullbacks, ranging uses S/R.
-    buy_price = best_prices["best_buy_price"]
-    buy_source = best_prices["best_buy_source"]
-    sell_price = best_prices["best_sell_price"]
-    sell_source = best_prices["best_sell_source"]
+    # Use detected S/R levels for stop-loss and targets; entry is always at current market price.
     support = best_prices["nearest_support"]
     resistance = best_prices["nearest_resistance"]
     condition = best_prices["condition"]
 
     if signal == "LONG":
-        entry = buy_price
-        target_1 = sell_price
-        # Extend target_2 beyond target_1
-        target_2 = target_1 + atr
-        stop_loss = entry - atr
-        reasons.append(f"Buy at {buy_source} ({buy_price:.2f}), sell at {sell_source} ({sell_price:.2f}) [{condition}]")
+        entry = current_price  # Enter at market price NOW
+        # Stop at nearest support, capped at 1.5×ATR, but at least 0.5×ATR below entry
+        stop_loss = max(support, entry - 1.5 * atr)
+        stop_loss = min(stop_loss, entry - 0.5 * atr)
+        risk = entry - stop_loss
+        if risk < 0.2 * atr:  # Too tight, not tradeable
+            signal, strength = "NO_TRADE", "Weak"
+            risk = atr
+        # Target capped at 1×ATR (realistic 5-min scalp move); use resistance if closer
+        target_1 = min(resistance, entry + atr)
+        if target_1 <= entry:
+            target_1 = entry + atr
+        target_2 = target_1 + 0.5 * atr
+        reasons.append(f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (support), target {target_1:.2f} (resistance) [{condition}]")
     elif signal == "SHORT":
-        entry = sell_price
-        target_1 = buy_price
-        target_2 = target_1 - atr
-        stop_loss = entry + atr
-        reasons.append(f"Sell at {sell_source} ({sell_price:.2f}), cover at {buy_source} ({buy_price:.2f}) [{condition}]")
+        entry = current_price  # Enter at market price NOW (short)
+        # Stop at nearest resistance, capped at 1.5×ATR, but at least 0.5×ATR above entry
+        stop_loss = min(resistance, entry + 1.5 * atr)
+        stop_loss = max(stop_loss, entry + 0.5 * atr)
+        risk = stop_loss - entry
+        if risk < 0.2 * atr:  # Too tight, not tradeable
+            signal, strength = "NO_TRADE", "Weak"
+            risk = atr
+        # Target capped at 1×ATR (realistic 5-min scalp move); use support if closer
+        target_1 = max(support, entry - atr)
+        if target_1 >= entry:
+            target_1 = entry - atr
+        target_2 = target_1 - 0.5 * atr
+        reasons.append(f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (resistance), target {target_1:.2f} (support) [{condition}]")
     else:
         entry = current_price
         stop_loss = current_price - 1.5 * atr
         target_1 = current_price + 1.5 * atr
-        target_2 = current_price + 2.5 * atr
+        target_2 = target_1 + 0.5 * atr
 
     risk = abs(entry - stop_loss)
     reward = abs(target_1 - entry)

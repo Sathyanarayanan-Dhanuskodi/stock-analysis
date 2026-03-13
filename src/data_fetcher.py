@@ -173,6 +173,13 @@ def get_stock_info(ticker: str) -> dict:
         "market_cap": info.get("marketCap", 0),
         "current_price": info.get("currentPrice", info.get("regularMarketPrice", 0)),
         "currency": info.get("currency", "INR"),
+        # Real-time intraday fields
+        "prev_close": info.get("regularMarketPreviousClose", 0),
+        "open_price": info.get("regularMarketOpen", 0),
+        "day_high": info.get("regularMarketDayHigh", 0),
+        "day_low": info.get("regularMarketDayLow", 0),
+        "week_52_high": info.get("fiftyTwoWeekHigh", 0),
+        "week_52_low": info.get("fiftyTwoWeekLow", 0),
     }
 
 

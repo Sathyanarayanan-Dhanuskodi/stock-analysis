@@ -766,24 +766,26 @@ if st.session_state["page"] == "analysis":
     # ============================================================
     # PRECOMPUTE — stock banner + quick stats data (used in analysis tabs)
     # ============================================================
-    price_change = raw_df["Close"].iloc[-1] - raw_df["Close"].iloc[-2]
-    pct_change = (price_change / raw_df["Close"].iloc[-2]) * 100
+    cur_price = info.get("current_price") or raw_df["Close"].iloc[-1]
+    # Use real-time previous close from .info; fall back to last daily candle close
+    prev_close = info.get("prev_close") or raw_df["Close"].iloc[-1]
+    price_change = cur_price - prev_close
+    pct_change = (price_change / prev_close * 100) if prev_close else 0
     change_arrow = "▲" if pct_change >= 0 else "▼"
     mcap_str = f"₹{info['market_cap'] / 1e7:,.0f} Cr" if info.get(
         "market_cap") else "N/A"
 
-    # 52-week range for context
-    w52_high = info.get("year_high", raw_df["High"].tail(252).max())
-    w52_low = info.get("year_low", raw_df["Low"].tail(252).min())
-    cur_price = info.get("current_price") or raw_df["Close"].iloc[-1]
+    # 52-week range — prefer real-time fields from .info
+    w52_high = info.get("week_52_high") or raw_df["High"].tail(252).max()
+    w52_low = info.get("week_52_low") or raw_df["Low"].tail(252).min()
     w52_pct = ((cur_price - w52_low) / (w52_high - w52_low)
                * 100) if w52_high > w52_low else 50
 
-    # Today's OHLC range
-    today_open = raw_df["Open"].iloc[-1]
-    today_high = raw_df["High"].iloc[-1]
-    today_low = raw_df["Low"].iloc[-1]
-    today_close = raw_df["Close"].iloc[-1]
+    # Today's OHLC range — use real-time intraday fields from .info
+    today_open = info.get("open_price") or raw_df["Open"].iloc[-1]
+    today_high = info.get("day_high") or raw_df["High"].iloc[-1]
+    today_low = info.get("day_low") or raw_df["Low"].iloc[-1]
+    today_close = prev_close  # "C" badge = previous close for reference
     today_range = today_high - today_low if today_high > today_low else 1
     today_open_pct = ((today_open - today_low) / today_range) * 100
     today_close_pct = ((today_close - today_low) / today_range) * 100
@@ -841,6 +843,13 @@ if st.session_state["page"] == "analysis":
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <span style="font-size: 18px; font-weight: 700; color: #e8e4de;">{info['name']}</span>
                     <span style="font-size: 11px; color: rgba(255,255,255,0.22); font-weight: 600; font-family: 'JetBrains Mono', monospace;">{ticker}</span>
+                    <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{ticker.replace('.NS', '')}" target="_blank"
+                       title="View on TradingView"
+                       style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+                              background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+                              text-decoration: none; color: rgba(255,255,255,0.5); font-size: 12px; transition: all 0.15s;"
+                       onmouseover="this.style.background='rgba(94,184,138,0.15)';this.style.borderColor='rgba(94,184,138,0.35)';this.style.color='#5eb88a'"
+                       onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.borderColor='rgba(255,255,255,0.12)';this.style.color='rgba(255,255,255,0.5)'">↗</a>
                     <span style="background: rgba(212,160,84,0.1); border: 1px solid rgba(212,160,84,0.15); color: #d4a054; font-size: 10px; font-weight: 700;
                            padding: 2px 8px; border-radius: 6px; letter-spacing: 0.04em;">{info['sector']}</span>
                 </div>
@@ -947,9 +956,9 @@ if st.session_state["page"] == "analysis":
 # ============================================================
 if st.session_state["page"] == "home":
     st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
-    _HOME_TAB_NAMES = ["Screener", "Paper Trading", "Accuracy"]
-    _HOME_TAB_KEYS = ["screener", "paper", "accuracy"]
-    tab_screener, tab_paper, tab_accuracy = st.tabs(_HOME_TAB_NAMES)
+    _HOME_TAB_NAMES = ["Scalping Screener", "Swing Screener", "Paper Trading", "Accuracy"]
+    _HOME_TAB_KEYS = ["scalp_screener", "swing_screener", "paper", "accuracy"]
+    tab_scalp_scr, tab_swing_scr, tab_paper, tab_accuracy = st.tabs(_HOME_TAB_NAMES)
 
     # Auto-switch tab from URL query param (?tab=screener)
     _qp_tab = st.query_params.get("tab")
@@ -964,11 +973,11 @@ if st.session_state["page"] == "home":
         """, height=0)
 
 if st.session_state["page"] == "analysis":
-    _ANALYSIS_TAB_NAMES = ["Chart & Predictions", "Swing",
-                           "Scalping", "Fundamentals", "Sector", "Sentiment"]
-    _ANALYSIS_TAB_KEYS = ["chart", "swing", "scalp",
+    _ANALYSIS_TAB_NAMES = ["Scalping", "Swing",
+                           "Chart & Predictions", "Fundamentals", "Sector", "Sentiment"]
+    _ANALYSIS_TAB_KEYS = ["scalp", "swing", "chart",
                           "fundamentals", "sector", "sentiment"]
-    tab_chart, tab_swing, tab_scalp, tab_fund, tab_sector, tab_sentiment = st.tabs(
+    tab_scalp, tab_swing, tab_chart, tab_fund, tab_sector, tab_sentiment = st.tabs(
         _ANALYSIS_TAB_NAMES)
 
     # Auto-switch tab from URL query param (?tab=swing)
@@ -1833,8 +1842,12 @@ if st.session_state["page"] == "analysis":
                 </div>""", unsafe_allow_html=True)
 
             with sc_sig_right:
+                _sc_fund = get_fund_balance("scalp")
+                _sc_max_qty = int(_sc_fund["available"] * 5 / ss.entry_price) if _sc_fund["available"] > 0 and ss.entry_price > 0 else 0
+                _sc_qty_default = max(1, _sc_max_qty) if _sc_max_qty > 0 else 100
                 scalp_qty = st.number_input(
-                    "Quantity", min_value=1, value=100, step=25, key="scalp_qty_trade")
+                    "Quantity", min_value=1, max_value=_sc_max_qty if _sc_max_qty > 0 else None,
+                    value=_sc_qty_default, step=25, key="scalp_qty_trade")
                 _sc_position_value = ss.entry_price * scalp_qty
                 _sc_margin_needed = _sc_position_value / 5  # 5x leverage
                 # Calculate charges
@@ -1859,6 +1872,10 @@ if st.session_state["page"] == "analysis":
                     <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
                         <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Entry</span>
                         <span style="font-size: 13px; font-weight: 700; color: #e8e4de; font-family: var(--mono);">₹{ss.entry_price:,.2f}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.35);">Max qty (5× leverage)</span>
+                        <span style="font-size: 12px; font-weight: 700; color: {'#9b8ec4' if _sc_max_qty > 0 else 'rgba(255,255,255,0.25)'}; font-family: var(--mono);">{"—" if _sc_max_qty == 0 else f"{_sc_max_qty} shares"}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
                         <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Stop Loss</span>
@@ -1907,7 +1924,6 @@ if st.session_state["page"] == "analysis":
                     with st.container(border=True):
                         st.markdown(
                             """<div style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 4px;">Paper Trade</div>""", unsafe_allow_html=True)
-                        _sc_fund = get_fund_balance("scalp")
                         _sc_fund_active = _sc_fund["initial_capital"] > 0
                         _sc_exit_opts = [f"Target 1 — ₹{ss.target_1:,.1f}"]
                         if ss.target_2:
@@ -2250,6 +2266,32 @@ if st.session_state["page"] == "home":
                 _status_color = "#5eb88a" if _is_active else "#d4a054"
                 _status_rgb = "94,184,138" if _is_active else "212,160,84"
 
+                # Fetch current price for live P&L
+                try:
+                    _cur_info = get_stock_info(row["ticker"])
+                    _cur_price = _cur_info.get("current_price") or 0
+                except Exception:
+                    _cur_price = 0
+                _tv_sym = row["ticker"].replace(".NS", "")
+                _tv_url = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{_tv_sym}"
+                if _cur_price and _is_active:
+                    _unreal_pnl = (_cur_price - row["entry_price"]) * row["quantity"] if _is_long else (row["entry_price"] - _cur_price) * row["quantity"]
+                    _unreal_color = "#5eb88a" if _unreal_pnl >= 0 else "#d45d5d"
+                    _unreal_sign = "+" if _unreal_pnl >= 0 else ""
+                    _cur_price_html = (
+                        f'<span style="font-size: 13px; color: rgba(255,255,255,0.55); margin-left: 8px;">'
+                        f'LTP <b style="color: #e8e4de;">₹{_cur_price:,.2f}</b></span>'
+                        f'<span style="font-size: 12px; color: {_unreal_color}; margin-left: 6px;">'
+                        f'{_unreal_sign}₹{_unreal_pnl:,.2f}</span>'
+                    )
+                elif _cur_price:
+                    _cur_price_html = (
+                        f'<span style="font-size: 13px; color: rgba(255,255,255,0.55); margin-left: 8px;">'
+                        f'LTP <b style="color: #e8e4de;">₹{_cur_price:,.2f}</b></span>'
+                    )
+                else:
+                    _cur_price_html = ""
+
                 # Read hit flags (with fallback for old data)
                 _entry_hit = bool(row.get("entry_hit", 0))
                 _t1_hit = bool(row.get("t1_hit", 0))
@@ -2276,10 +2318,13 @@ if st.session_state["page"] == "home":
                     border: 1px solid rgba(255,255,255,0.05); border-left: 3px solid {_dir_color};
                     border-radius: 10px; padding: 18px 22px; margin-bottom: 10px;">
                     <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                             <span style="font-size: 20px; font-weight: 800; color: {_dir_color};">{_dir_icon}</span>
-                            <span style="font-size: 17px; font-weight: 800; color: #e8e4de;">
-                                {row['ticker'].replace('.NS', '')}</span>
+                            <span style="font-size: 17px; font-weight: 800; color: #e8e4de;">{row['ticker'].replace('.NS', '')}</span>
+                            <a href="{_tv_url}" target="_blank" title="View on TradingView"
+                               style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+                                      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+                                      text-decoration: none; color: rgba(255,255,255,0.5); font-size: 12px;">↗</a>
                             <span style="display: inline-block; font-size: 10px; font-weight: 700;
                                 text-transform: uppercase; letter-spacing: 0.8px; padding: 3px 10px;
                                 border-radius: 20px; background: {_badge_bg}; border: 1px solid {_badge_border};
@@ -2288,6 +2333,7 @@ if st.session_state["page"] == "home":
                                 text-transform: uppercase; letter-spacing: 0.8px; padding: 3px 10px;
                                 border-radius: 20px; background: rgba({_status_rgb},0.1);
                                 border: 1px solid {_status_color}; color: {_status_color};">{_status_label}</span>
+                            {_cur_price_html}
                         </div>
                         <div style="font-size: 13px; color: rgba(255,255,255,0.22);">
                             Qty {row['quantity']} | ₹{row.get('capital_used', 0) or 0:,.0f} capital | Exit: {row.get('exit_target', 'T1') or 'T1'} | {_opened_short}</div>
@@ -2619,126 +2665,34 @@ if st.session_state["page"] == "analysis":
 # TAB 7: SCREENER
 # ========================================================================
 if st.session_state["page"] == "home":
-    with tab_screener:
+    # ── SCALPING SCREENER TAB ──
+    with tab_scalp_scr:
         st.markdown("""<div style="margin-bottom: 12px;">
-            <span style="font-size: 20px; font-weight: 700; color: #e8e4de;">Screener</span>
-            <div style="font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px;">Scan &amp; find the best trades across top 25 stocks</div>
+            <span style="font-size: 20px; font-weight: 700; color: #e8e4de;">Scalping Screener</span>
+            <div style="font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px;">Scan &amp; find the best scalping trades across top stocks</div>
         </div>""", unsafe_allow_html=True)
-        help_box("<b>Stock Screener</b> scans multiple stocks using a <b>multi-factor approach</b> inspired by BlackRock's SAE methodology. "
-                 "It combines <b>Technical Signals</b> (RSI, MACD, ADX, EMAs) with <b>Fundamental Momentum</b> (earnings growth, volume trends) "
-                 "to find the best stocks for swing trading and scalping.")
 
-        scr_c1, scr_c2 = st.columns([2, 1])
-        with scr_c1:
-            scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
-                                      help="Scan all 25 popular stocks or pick a sector")
-        with scr_c2:
+        _sc_scr_c1, _sc_scr_c2 = st.columns([2, 1])
+        with _sc_scr_c1:
+            scalp_scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
+                                             key="scalp_scan_scope",
+                                             help="Scan all 25 popular stocks or pick a sector")
+        with _sc_scr_c2:
             st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
-            scan_btn = st.button("🔍 Scan Now", type="primary",
-                                 use_container_width=True)
+            scalp_scan_btn = st.button("🔍 Scan Scalping", type="primary",
+                                        use_container_width=True, key="scalp_scan_btn")
 
-        if scan_btn:
-            if scan_scope == "All Popular Stocks":
-                scan_tickers = list(POPULAR_INDIAN_STOCKS.keys())
+        if scalp_scan_btn:
+            if scalp_scan_scope == "All Popular Stocks":
+                _sc_tickers = list(POPULAR_INDIAN_STOCKS.keys())
             else:
-                scan_tickers = SECTOR_STOCKS[scan_scope]
+                _sc_tickers = SECTOR_STOCKS[scalp_scan_scope]
 
-            total_steps = len(scan_tickers) * 2  # swing + scalp pass
-            progress = st.progress(0, text="Scanning stocks...")
-            with st.spinner("Analyzing each stock for swing & scalping..."):
-                scan_results = []
+            progress = st.progress(0, text="Scanning stocks for scalping...")
+            with st.spinner("Analyzing each stock for scalping..."):
                 scalp_results = []
-                for idx, t in enumerate(scan_tickers):
-                    # --- Swing scan ---
-                    progress.progress((idx * 2 + 1) / total_steps,
-                                      text=f"Swing scan: {t.replace('.NS', '')}...")
-                    try:
-                        t_df = fetch_stock_data(t, period_years=1)
-                        t_df = add_technical_indicators(t_df)
-                        t_signal = generate_swing_signals(t_df)
-                        t_latest = t_df.iloc[-1]
-                        t_setup = calculate_trade_setup(t_df, t_signal)
-                        t_patterns = identify_swing_patterns(t_df)
-                        # Multi-factor composite score (inspired by BlackRock SAE)
-                        # Factor 1: Technical signal strength (40%)
-                        tech_score = t_signal.confidence
-
-                        # Factor 2: Momentum (20%) — price above key MAs + positive ROC
-                        momentum_score = 0
-                        if t_latest["Close"] > t_latest.get("SMA_20", t_latest["Close"]):
-                            momentum_score += 0.25
-                        if t_latest["Close"] > t_latest.get("SMA_50", t_latest["Close"]):
-                            momentum_score += 0.25
-                        if t_latest["Close"] > t_latest.get("SMA_200", t_latest["Close"]):
-                            momentum_score += 0.25
-                        roc = t_latest.get("ROC", 0)
-                        if roc > 0:
-                            momentum_score += min(0.25, roc / 20)
-
-                        # Factor 3: Quality (20%) — healthy RSI, strong ADX, volume confirmation
-                        quality_score = 0
-                        rsi_val = t_latest.get("RSI", 50)
-                        if 40 < rsi_val < 65:
-                            quality_score += 0.4  # Healthy RSI zone
-                        elif 30 < rsi_val <= 40:
-                            quality_score += 0.3  # Oversold recovery zone
-                        if t_latest.get("ADX", 0) > 25:
-                            quality_score += 0.3  # Strong trend
-                        if t_latest.get("Volume_Ratio", 1) > 1.0:
-                            quality_score += 0.3  # Active volume
-
-                        # Factor 4: Sentiment/Price Action (20%) — patterns + BB position
-                        sentiment_score = 0
-                        if t_patterns:
-                            bullish_patterns = sum(
-                                1 for p in t_patterns if "bullish" in p["implication"].lower())
-                            sentiment_score += min(0.5,
-                                                   bullish_patterns * 0.25)
-                        # Price in lower half of BB = more upside potential
-                        if "BB_Upper" in t_df.columns and "BB_Lower" in t_df.columns:
-                            bb_range = t_latest["BB_Upper"] - \
-                                t_latest["BB_Lower"]
-                            if bb_range > 0:
-                                bb_position = (
-                                    t_latest["Close"] - t_latest["BB_Lower"]) / bb_range
-                                if bb_position < 0.4:
-                                    sentiment_score += 0.5
-
-                        composite = (0.4 * tech_score + 0.2 * momentum_score +
-                                     0.2 * quality_score + 0.2 * sentiment_score)
-
-                        # Display-only scores
-                        _d_tech = compute_tech_score(t_latest, t_signal.confidence)
-                        try:
-                            _d_fund_data = get_stock_fundamentals(t)
-                        except Exception:
-                            _d_fund_data = {}
-                        _d_fund = compute_fundamental_score(_d_fund_data)
-
-                        scan_results.append({
-                            "ticker": t,
-                            "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
-                            "price": t_latest["Close"],
-                            "signal": t_signal.signal,
-                            "strength": t_signal.strength,
-                            "confidence": t_signal.confidence,
-                            "composite_score": round(composite, 3),
-                            "reasons": t_signal.reasons,
-                            "rsi": t_latest.get("RSI", 0),
-                            "macd": t_latest.get("MACD", 0),
-                            "macd_signal": t_latest.get("MACD_Signal", 0),
-                            "adx": t_latest.get("ADX", 0),
-                            "volume_ratio": t_latest.get("Volume_Ratio", 1),
-                            "setup": t_setup,
-                            "patterns": t_patterns,
-                            "tech_score": _d_tech,
-                            "fund_score": _d_fund,
-                        })
-                    except Exception:
-                        pass
-
-                    # --- Scalp scan ---
-                    progress.progress((idx * 2 + 2) / total_steps,
+                for idx, t in enumerate(_sc_tickers):
+                    progress.progress((idx + 1) / len(_sc_tickers),
                                       text=f"Scalp scan: {t.replace('.NS', '')}...")
                     try:
                         intra_df = fetch_intraday_data(
@@ -2747,12 +2701,12 @@ if st.session_state["page"] == "home":
                         s_signal = generate_scalp_signal(intra_df)
                         s_micro = get_market_microstructure(intra_df)
                         s_levels = get_scalping_levels(intra_df)
-                        # Reuse fund score from swing scan if available
                         _sc_fund = 0
-                        for _sr in scan_results:
-                            if _sr["ticker"] == t:
-                                _sc_fund = _sr.get("fund_score", 0)
-                                break
+                        try:
+                            _sc_fund_data = get_stock_fundamentals(t)
+                            _sc_fund = compute_fundamental_score(_sc_fund_data)
+                        except Exception:
+                            pass
                         scalp_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -2777,10 +2731,6 @@ if st.session_state["page"] == "home":
                     except Exception:
                         pass
 
-                scan_results.sort(
-                    key=lambda x: x["composite_score"], reverse=True)
-                # Sort scalp results by combined score: scalpability (weight 0.6) + confidence (weight 0.4)
-                # This ensures high-scalpability stocks rank higher than just high-confidence ones
                 scalp_results.sort(
                     key=lambda x: 0.6 *
                     (x["scalpability"] / 100) + 0.4 * x["confidence"],
@@ -2788,168 +2738,53 @@ if st.session_state["page"] == "home":
                 )
                 progress.progress(1.0, text="Scan complete!")
 
-            st.session_state["scan_results"] = scan_results
             st.session_state["scalp_results"] = scalp_results
 
-        if ("scan_results" not in st.session_state or not st.session_state["scan_results"]) and not scan_btn:
+        if ("scalp_results" not in st.session_state or not st.session_state.get("scalp_results")) and not scalp_scan_btn:
             st.markdown("""<div class="empty-state">
                 <div class="es-icon">🔍</div>
                 <div class="es-title">Ready to scan</div>
-                <div class="es-desc">Click <b>Scan Now</b> to analyze stocks for swing and scalping opportunities.<br>
-                Uses multi-factor scoring (Technical + Momentum + Quality + Sentiment).</div>
+                <div class="es-desc">Click <b>Scan Scalping</b> to find scalping opportunities on 5-min charts.</div>
             </div>""", unsafe_allow_html=True)
 
-        if "scan_results" in st.session_state and st.session_state["scan_results"]:
-            results = st.session_state["scan_results"]
-            scalp_res = st.session_state.get("scalp_results", [])
+        if st.session_state.get("scalp_results"):
+            scalp_res = st.session_state["scalp_results"]
 
-            # Top picks
-            buys = [r for r in results if r["signal"] == "BUY"]
-            sells = [r for r in results if r["signal"] == "SELL"]
-            holds = [r for r in results if r["signal"] == "HOLD"]
-
-            # ── SUMMARY BAR ──
-            total_scanned = len(results)
+            # Summary bar
+            scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"]
+            scalp_shorts_all = [r for r in scalp_res if r["signal"] == "SHORT"]
+            scalp_no_all = [r for r in scalp_res if r["signal"] == "NO_TRADE"]
             st.markdown(f"""<div class="quick-stats">
                 <div class="quick-stat">
                     <div class="qs-label">Scanned</div>
-                    <div class="qs-value">{total_scanned}</div>
+                    <div class="qs-value">{len(scalp_res)}</div>
                     <div class="qs-delta" style="color: rgba(255,255,255,0.45);">stocks</div>
                 </div>
                 <div class="quick-stat">
-                    <div class="qs-label">Buy Signals</div>
-                    <div class="qs-value" style="color: #5eb88a;">{len(buys)}</div>
-                    <div class="qs-delta" style="color: #5eb88a;">{'🟢' * min(len(buys), 5)}</div>
+                    <div class="qs-label">Long Signals</div>
+                    <div class="qs-value" style="color: #5eb88a;">{len(scalp_longs_all)}</div>
+                    <div class="qs-delta" style="color: #5eb88a;">{'🟢' * min(len(scalp_longs_all), 5)}</div>
                 </div>
                 <div class="quick-stat">
-                    <div class="qs-label">Sell Signals</div>
-                    <div class="qs-value" style="color: #d45d5d;">{len(sells)}</div>
-                    <div class="qs-delta" style="color: #d45d5d;">{'🔴' * min(len(sells), 5)}</div>
+                    <div class="qs-label">Short Signals</div>
+                    <div class="qs-value" style="color: #d45d5d;">{len(scalp_shorts_all)}</div>
+                    <div class="qs-delta" style="color: #d45d5d;">{'🔴' * min(len(scalp_shorts_all), 5)}</div>
                 </div>
                 <div class="quick-stat">
-                    <div class="qs-label">Hold</div>
-                    <div class="qs-value" style="color: #d4a054;">{len(holds)}</div>
-                    <div class="qs-delta" style="color: #d4a054;">{'🟡' * min(len(holds), 5)}</div>
+                    <div class="qs-label">No Trade</div>
+                    <div class="qs-value" style="color: #d4a054;">{len(scalp_no_all)}</div>
+                    <div class="qs-delta" style="color: #d4a054;">{'🟡' * min(len(scalp_no_all), 5)}</div>
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            # ── TOP SWING PICKS (Row-based) ──
-            st.markdown("#### Top Swing Picks")
-            if buys:
-                for i, pick in enumerate(buys[:5]):
-                    p_setup = pick.get("setup")
-                    _badge = '<span class="badge-best">Best</span>' if i == 0 else f'<span class="badge-rank">#{i+1}</span>'
-                    _entry_str = f"₹{p_setup.entry_price:,.2f}" if p_setup else "—"
-                    _sl_str = f"₹{p_setup.stop_loss:,.2f}" if p_setup else "—"
-                    _t1_str = f"₹{p_setup.target_1:,.2f}" if p_setup else "—"
-                    _rr_str = f"1:{p_setup.risk_reward_1}" if p_setup else "—"
-                    _score_pct = pick.get('composite_score', 0) * 100
-                    _score_color = "#5eb88a" if _score_pct >= 60 else "#d4a054" if _score_pct >= 40 else "rgba(255,255,255,0.45)"
-                    _ts = pick.get("tech_score", 0)
-                    _fs = pick.get("fund_score", 0)
-                    _ts_color = "#5eb88a" if _ts >= 60 else "#d4a054" if _ts >= 40 else "#d45d5d"
-                    _fs_color = "#5eb88a" if _fs >= 60 else "#d4a054" if _fs >= 40 else "#d45d5d"
-
-                    # Signal badge
-                    _sig_bg = "rgba(94,184,138,0.12)" if pick["signal"] == "BUY" else "rgba(212,93,93,0.12)"
-                    _sig_border = "rgba(94,184,138,0.25)" if pick["signal"] == "BUY" else "rgba(212,93,93,0.25)"
-                    _sig_color = "#5eb88a" if pick["signal"] == "BUY" else "#d45d5d"
-
-                    # Profit & charges
-                    _sw_profit_html = ""
-                    if p_setup:
-                        _sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1, "delivery")
-                        _sw_np = _sw_ch["net_profit"]
-                        _sw_np_color = "#5eb88a" if _sw_np > 0 else "#d45d5d"
-                        _sw_np_sign = "+" if _sw_np > 0 else ""
-                        _sw_profit_html = f"""<div style="text-align: center;">
-                                <div style="font-size: 13px; font-weight: 700; color: {_sw_np_color}; font-family: var(--mono);">{_sw_np_sign}₹{_sw_np:,.2f}</div>
-                                <div style="font-size: 12px; color: rgba(255,255,255,0.22);">charges ₹{_sw_ch['total_charges']:.2f}</div>
-                            </div>"""
-
-                    _sw_card_col, _sw_act_col = st.columns([8, 1], vertical_alignment="center")
-                    with _sw_card_col:
-                        st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px;
-                            padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
-                            <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
-                                {_badge}
-                                <div>
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
-                                        <span style="background: {_sig_bg}; border: 1px solid {_sig_border}; color: {_sig_color};
-                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">{pick['signal']}</span>
-                                    </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">₹{pick['price']:,.2f}</div>
-                                </div>
-                            </div>
-                            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Entry</div>
-                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de; font-family: 'JetBrains Mono', monospace;">{_entry_str}</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Target</div>
-                                    <div style="font-size: 14px; font-weight: 600; color: #5eb88a; font-family: 'JetBrains Mono', monospace;">{_t1_str}</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Stop Loss</div>
-                                    <div style="font-size: 14px; font-weight: 600; color: #d45d5d; font-family: 'JetBrains Mono', monospace;">{_sl_str}</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">R:R</div>
-                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de;">{_rr_str}</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Tech</div>
-                                    <div style="font-size: 14px; font-weight: 700; color: {_ts_color};">{_ts}/100</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Fund</div>
-                                    <div style="font-size: 14px; font-weight: 700; color: {_fs_color};">{_fs}/100</div>
-                                </div>
-                                {_sw_profit_html}
-                            </div>
-                        </div>""", unsafe_allow_html=True)
-                    with _sw_act_col:
-                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
-                        if st.button("Paper Trade", key=f"scr_sw_pt_{i}", type="primary", use_container_width=True):
-                            if p_setup:
-                                try:
-                                    _tid = place_trade(
-                                        ticker=pick["ticker"], trade_type="swing",
-                                        direction=pick["signal"],
-                                        entry_price=p_setup.entry_price,
-                                        stop_loss=p_setup.stop_loss,
-                                        target_1=p_setup.target_1,
-                                        target_2=p_setup.target_2,
-                                        target_3=p_setup.target_3,
-                                        quantity=1,
-                                        signal_strength=pick["strength"],
-                                        confidence=pick["confidence"],
-                                        reasons=", ".join(
-                                            pick["reasons"]) if pick["reasons"] else "",
-                                    )
-                                    st.success(f"Trade #{_tid} placed!")
-                                except ValueError as e:
-                                    st.error(str(e))
-                            else:
-                                st.warning("No trade setup available")
-                        st.markdown(
-                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
-                            f'Analyze</a>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-            else:
-                st.info("No BUY signals found.")
-
-            st.markdown("---")
             # ── TOP SCALPING PICKS (Row-based) ──
-            scalp_longs_all = [r for r in scalp_res if r["signal"]
-                               == "LONG"] if scalp_res else []
-            if scalp_longs_all:
+            scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"] if scalp_res else []
+            scalp_shorts_all = [r for r in scalp_res if r["signal"] == "SHORT"] if scalp_res else []
+            if scalp_longs_all or scalp_shorts_all:
                 st.markdown("#### Top Scalping Picks")
-                for i, pick in enumerate(scalp_longs_all[:5]):
+            if scalp_longs_all:
+                st.markdown("<div style='font-size:13px;font-weight:700;color:#5eb88a;margin:6px 0 4px;letter-spacing:0.5px;'>▲ LONG Opportunities</div>", unsafe_allow_html=True)
+            for i, pick in enumerate(scalp_longs_all[:5]):
                     _badge = '<span class="badge-best">Best</span>' if i == 0 else f'<span class="badge-rank">#{i+1}</span>'
                     _scalp_color = "#5eb88a" if pick['scalpability'] >= 65 else "#d4a054" if pick[
                         'scalpability'] >= 40 else "#d45d5d"
@@ -2981,10 +2816,12 @@ if st.session_state["page"] == "home":
                                 <div>
                                     <div style="display: flex; align-items: center; gap: 8px;">
                                         <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
+                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
+                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
                                         <span style="background: {_sc_sig_bg}; border: 1px solid {_sc_sig_border}; color: {_sc_sig_color};
                                                font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">{_sc_sig_label}</span>
                                     </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">₹{pick['price']:,.2f}</div>
+                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
                                 </div>
                             </div>
                             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
@@ -3049,20 +2886,494 @@ if st.session_state["page"] == "home":
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
 
+            if scalp_shorts_all:
+                st.markdown("<div style='font-size:13px;font-weight:700;color:#d45d5d;margin:10px 0 4px;letter-spacing:0.5px;'>▼ SHORT Opportunities</div>", unsafe_allow_html=True)
+                for i, pick in enumerate(scalp_shorts_all[:5]):
+                    _badge = '<span class="badge-best">Best</span>' if i == 0 else f'<span class="badge-rank">#{i+1}</span>'
+                    _scalp_color = "#5eb88a" if pick['scalpability'] >= 65 else "#d4a054" if pick['scalpability'] >= 40 else "#d45d5d"
+                    _sc_ch = calc_angel_one_charges(pick["target_1"], pick["entry"], 1)
+                    _sc_np = _sc_ch["net_profit"]
+                    _sc_np_color = "#5eb88a" if _sc_np > 0 else "#d45d5d"
+                    _sc_np_sign = "+" if _sc_np > 0 else ""
+                    _sc_ss = pick.get("scalp_score", 0)
+                    _sc_ts = pick.get("tech_score", 0)
+                    _sc_fs = pick.get("fund_score", 0)
+                    _sc_ss_color = "#5eb88a" if _sc_ss >= 60 else "#d4a054" if _sc_ss >= 40 else "#d45d5d"
+                    _sc_ts_color = "#5eb88a" if _sc_ts >= 60 else "#d4a054" if _sc_ts >= 40 else "#d45d5d"
+                    _sc_fs_color = "#5eb88a" if _sc_fs >= 60 else "#d4a054" if _sc_fs >= 40 else "#d45d5d"
+
+                    _sc_card_col, _sc_act_col = st.columns([8, 1], vertical_alignment="center")
+                    with _sc_card_col:
+                        st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(212,93,93,0.15); border-radius: 10px;
+                            padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                            <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
+                                {_badge}
+                                <div>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
+                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
+                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
+                                        <span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d;
+                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span>
+                                    </div>
+                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Entry</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de; font-family: 'JetBrains Mono', monospace;">₹{pick['entry']:,.2f}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Target</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #5eb88a; font-family: 'JetBrains Mono', monospace;">₹{pick['target_1']:,.2f}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Stop Loss</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #d45d5d; font-family: 'JetBrains Mono', monospace;">₹{pick['stop_loss']:,.2f}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">R:R</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de;">{pick['risk_reward']}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Scalp</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_sc_ss_color};">{_sc_ss}/100</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Tech</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_sc_ts_color};">{_sc_ts}/100</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Fund</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_sc_fs_color};">{_sc_fs}/100</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 13px; font-weight: 700; color: {_sc_np_color}; font-family: var(--mono);">{_sc_np_sign}₹{_sc_np:,.2f}</div>
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30);">charges ₹{_sc_ch['total_charges']:.2f}</div>
+                                </div>
+                            </div>
+                        </div>""", unsafe_allow_html=True)
+                    with _sc_act_col:
+                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
+                        if st.button("Paper Trade", key=f"scr_sc_short_pt_{i}", type="primary", use_container_width=True):
+                            try:
+                                _tid = place_trade(
+                                    ticker=pick["ticker"], trade_type="scalp",
+                                    direction=pick["signal"],
+                                    entry_price=pick["entry"],
+                                    stop_loss=pick["stop_loss"],
+                                    target_1=pick["target_1"],
+                                    target_2=pick["target_2"],
+                                    quantity=1,
+                                    signal_strength=pick["strength"],
+                                    confidence=pick["confidence"],
+                                    reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
+                                )
+                                st.success(f"Trade #{_tid} placed!")
+                            except ValueError as e:
+                                st.error(str(e))
+                        st.markdown(
+                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=scalp" target="_blank">'
+                            f'Analyze</a>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+            # All Scalping Signals table
+            st.markdown("---")
+            st.markdown("#### All Scalping Signals")
+            scalp_table = []
+            for r in scalp_res:
+                sig_emoji = {"LONG": "🟢", "SHORT": "🔴",
+                             "NO_TRADE": "🟡"}.get(r["signal"], "⚪")
+                if r["signal"] == "LONG":
+                    sc_ch = calc_angel_one_charges(r['entry'], r['target_1'], 1)
+                    profit_str = f"{sc_ch['net_profit']:.2f}"
+                elif r["signal"] == "SHORT":
+                    sc_ch = calc_angel_one_charges(r['target_1'], r['entry'], 1)
+                    profit_str = f"{sc_ch['net_profit']:.2f}"
+                else:
+                    profit_str = "—"
+                scalp_table.append({
+                    "Stock": r["name"],
+                    "Price (₹)": f"{r['price']:,.2f}",
+                    "Signal": f"{sig_emoji} {r['signal']}",
+                    "Entry (₹)": f"{r['entry']:,.2f}",
+                    "Target 1 (₹)": f"{r['target_1']:,.2f}",
+                    "SL (₹)": f"{r['stop_loss']:,.2f}",
+                    "Profit/share (₹)": profit_str,
+                    "R:R": f"{r['risk_reward']}",
+                    "Scalpability": f"{r['scalpability']}/100",
+                    "Trend": r["trend"],
+                })
+            if scalp_table:
+                st.dataframe(pd.DataFrame(scalp_table),
+                             use_container_width=True, hide_index=True)
+
+    # ── SWING SCREENER TAB ──
+    with tab_swing_scr:
+        st.markdown("""<div style="margin-bottom: 12px;">
+            <span style="font-size: 20px; font-weight: 700; color: #e8e4de;">Swing Screener</span>
+            <div style="font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px;">Scan &amp; find the best swing trades across top stocks</div>
+        </div>""", unsafe_allow_html=True)
+
+        _sw_scr_c1, _sw_scr_c2 = st.columns([2, 1])
+        with _sw_scr_c1:
+            swing_scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
+                                             key="swing_scan_scope",
+                                             help="Scan all 25 popular stocks or pick a sector")
+        with _sw_scr_c2:
+            st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
+            swing_scan_btn = st.button("🔍 Scan Swing", type="primary",
+                                        use_container_width=True, key="swing_scan_btn")
+
+        if swing_scan_btn:
+            if swing_scan_scope == "All Popular Stocks":
+                _sw_tickers = list(POPULAR_INDIAN_STOCKS.keys())
+            else:
+                _sw_tickers = SECTOR_STOCKS[swing_scan_scope]
+
+            progress = st.progress(0, text="Scanning stocks for swing trades...")
+            with st.spinner("Analyzing each stock for swing trading..."):
+                scan_results = []
+                for idx, t in enumerate(_sw_tickers):
+                    progress.progress((idx + 1) / len(_sw_tickers),
+                                      text=f"Swing scan: {t.replace('.NS', '')}...")
+                    try:
+                        t_df = fetch_stock_data(t, period_years=1)
+                        t_df = add_technical_indicators(t_df)
+                        t_signal = generate_swing_signals(t_df)
+                        t_latest = t_df.iloc[-1]
+                        t_setup = calculate_trade_setup(t_df, t_signal)
+                        try:
+                            _t_info = get_stock_info(t)
+                            _t_ltp = _t_info.get("current_price") or t_latest["Close"]
+                        except Exception:
+                            _t_ltp = t_latest["Close"]
+                        t_patterns = identify_swing_patterns(t_df)
+                        # Multi-factor composite score
+                        tech_score = t_signal.confidence
+                        momentum_score = 0
+                        if t_latest["Close"] > t_latest.get("SMA_20", t_latest["Close"]):
+                            momentum_score += 0.25
+                        if t_latest["Close"] > t_latest.get("SMA_50", t_latest["Close"]):
+                            momentum_score += 0.25
+                        if t_latest["Close"] > t_latest.get("SMA_200", t_latest["Close"]):
+                            momentum_score += 0.25
+                        roc = t_latest.get("ROC", 0)
+                        if roc > 0:
+                            momentum_score += min(0.25, roc / 20)
+                        quality_score = 0
+                        rsi_val = t_latest.get("RSI", 50)
+                        if 40 < rsi_val < 65:
+                            quality_score += 0.4
+                        elif 30 < rsi_val <= 40:
+                            quality_score += 0.3
+                        if t_latest.get("ADX", 0) > 25:
+                            quality_score += 0.3
+                        if t_latest.get("Volume_Ratio", 1) > 1.0:
+                            quality_score += 0.3
+                        sentiment_score = 0
+                        if t_patterns:
+                            bullish_patterns = sum(
+                                1 for p in t_patterns if "bullish" in p["implication"].lower())
+                            sentiment_score += min(0.5, bullish_patterns * 0.25)
+                        if "BB_Upper" in t_df.columns and "BB_Lower" in t_df.columns:
+                            bb_range = t_latest["BB_Upper"] - t_latest["BB_Lower"]
+                            if bb_range > 0:
+                                bb_position = (t_latest["Close"] - t_latest["BB_Lower"]) / bb_range
+                                if bb_position < 0.4:
+                                    sentiment_score += 0.5
+                        composite = (0.4 * tech_score + 0.2 * momentum_score +
+                                     0.2 * quality_score + 0.2 * sentiment_score)
+                        _d_tech = compute_tech_score(t_latest, t_signal.confidence)
+                        try:
+                            _d_fund_data = get_stock_fundamentals(t)
+                        except Exception:
+                            _d_fund_data = {}
+                        _d_fund = compute_fundamental_score(_d_fund_data)
+                        scan_results.append({
+                            "ticker": t,
+                            "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
+                            "price": t_latest["Close"],
+                            "ltp": _t_ltp,
+                            "signal": t_signal.signal,
+                            "strength": t_signal.strength,
+                            "confidence": t_signal.confidence,
+                            "composite_score": round(composite, 3),
+                            "reasons": t_signal.reasons,
+                            "rsi": t_latest.get("RSI", 0),
+                            "macd": t_latest.get("MACD", 0),
+                            "macd_signal": t_latest.get("MACD_Signal", 0),
+                            "adx": t_latest.get("ADX", 0),
+                            "volume_ratio": t_latest.get("Volume_Ratio", 1),
+                            "setup": t_setup,
+                            "patterns": t_patterns,
+                            "tech_score": _d_tech,
+                            "fund_score": _d_fund,
+                        })
+                    except Exception:
+                        pass
+
+                scan_results.sort(key=lambda x: x["composite_score"], reverse=True)
+                progress.progress(1.0, text="Scan complete!")
+
+            st.session_state["scan_results"] = scan_results
+
+        if ("scan_results" not in st.session_state or not st.session_state.get("scan_results")) and not swing_scan_btn:
+            st.markdown("""<div class="empty-state">
+                <div class="es-icon">🔍</div>
+                <div class="es-title">Ready to scan</div>
+                <div class="es-desc">Click <b>Scan Swing</b> to find swing trading opportunities on daily charts.</div>
+            </div>""", unsafe_allow_html=True)
+
+        if st.session_state.get("scan_results"):
+            results = st.session_state["scan_results"]
+
+            buys = [r for r in results if r["signal"] == "BUY"]
+            sells = [r for r in results if r["signal"] == "SELL"]
+            holds = [r for r in results if r["signal"] == "HOLD"]
+
+            st.markdown(f"""<div class="quick-stats">
+                <div class="quick-stat">
+                    <div class="qs-label">Scanned</div>
+                    <div class="qs-value">{len(results)}</div>
+                    <div class="qs-delta" style="color: rgba(255,255,255,0.45);">stocks</div>
+                </div>
+                <div class="quick-stat">
+                    <div class="qs-label">Buy Signals</div>
+                    <div class="qs-value" style="color: #5eb88a;">{len(buys)}</div>
+                    <div class="qs-delta" style="color: #5eb88a;">{'🟢' * min(len(buys), 5)}</div>
+                </div>
+                <div class="quick-stat">
+                    <div class="qs-label">Sell Signals</div>
+                    <div class="qs-value" style="color: #d45d5d;">{len(sells)}</div>
+                    <div class="qs-delta" style="color: #d45d5d;">{'🔴' * min(len(sells), 5)}</div>
+                </div>
+                <div class="quick-stat">
+                    <div class="qs-label">Hold</div>
+                    <div class="qs-value" style="color: #d4a054;">{len(holds)}</div>
+                    <div class="qs-delta" style="color: #d4a054;">{'🟡' * min(len(holds), 5)}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            st.markdown("#### Top Swing Picks")
+            if buys:
+                st.markdown('<div style="font-size: 14px; font-weight: 700; color: #5eb88a; margin-bottom: 8px;">▲ LONG Opportunities</div>', unsafe_allow_html=True)
+                for i, pick in enumerate(buys[:5]):
+                    p_setup = pick.get("setup")
+                    _badge = '<span class="badge-best">Best</span>' if i == 0 else f'<span class="badge-rank">#{i+1}</span>'
+                    _entry_str = f"₹{p_setup.entry_price:,.2f}" if p_setup else "—"
+                    _sl_str = f"₹{p_setup.stop_loss:,.2f}" if p_setup else "—"
+                    _t1_str = f"₹{p_setup.target_1:,.2f}" if p_setup else "—"
+                    _rr_str = f"1:{p_setup.risk_reward_1}" if p_setup else "—"
+                    _score_pct = pick.get('composite_score', 0) * 100
+                    _score_color = "#5eb88a" if _score_pct >= 60 else "#d4a054" if _score_pct >= 40 else "rgba(255,255,255,0.45)"
+                    _ts = pick.get("tech_score", 0)
+                    _fs = pick.get("fund_score", 0)
+                    _ts_color = "#5eb88a" if _ts >= 60 else "#d4a054" if _ts >= 40 else "#d45d5d"
+                    _fs_color = "#5eb88a" if _fs >= 60 else "#d4a054" if _fs >= 40 else "#d45d5d"
+
+                    # Signal badge
+                    _sig_bg = "rgba(94,184,138,0.12)" if pick["signal"] == "BUY" else "rgba(212,93,93,0.12)"
+                    _sig_border = "rgba(94,184,138,0.25)" if pick["signal"] == "BUY" else "rgba(212,93,93,0.25)"
+                    _sig_color = "#5eb88a" if pick["signal"] == "BUY" else "#d45d5d"
+
+                    # Profit & charges
+                    _sw_profit_html = ""
+                    if p_setup:
+                        _sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1, "delivery")
+                        _sw_np = _sw_ch["net_profit"]
+                        _sw_np_color = "#5eb88a" if _sw_np > 0 else "#d45d5d"
+                        _sw_np_sign = "+" if _sw_np > 0 else ""
+                        _sw_profit_html = f"""<div style="text-align: center;">
+                                <div style="font-size: 13px; font-weight: 700; color: {_sw_np_color}; font-family: var(--mono);">{_sw_np_sign}₹{_sw_np:,.2f}</div>
+                                <div style="font-size: 12px; color: rgba(255,255,255,0.22);">charges ₹{_sw_ch['total_charges']:.2f}</div>
+                            </div>"""
+
+                    _sw_card_col, _sw_act_col = st.columns([8, 1], vertical_alignment="center")
+                    with _sw_card_col:
+                        st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px;
+                            padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                            <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
+                                {_badge}
+                                <div>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
+                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
+                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
+                                        <span style="background: {_sig_bg}; border: 1px solid {_sig_border}; color: {_sig_color};
+                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">{pick['signal']}</span>
+                                    </div>
+                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Entry</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de; font-family: 'JetBrains Mono', monospace;">{_entry_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Target</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #5eb88a; font-family: 'JetBrains Mono', monospace;">{_t1_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Stop Loss</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #d45d5d; font-family: 'JetBrains Mono', monospace;">{_sl_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">R:R</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de;">{_rr_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Tech</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_ts_color};">{_ts}/100</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Fund</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_fs_color};">{_fs}/100</div>
+                                </div>
+                                {_sw_profit_html}
+                            </div>
+                        </div>""", unsafe_allow_html=True)
+                    with _sw_act_col:
+                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
+                        if st.button("Paper Trade", key=f"scr_sw_pt_{i}", type="primary", use_container_width=True):
+                            if p_setup:
+                                try:
+                                    _tid = place_trade(
+                                        ticker=pick["ticker"], trade_type="swing",
+                                        direction=pick["signal"],
+                                        entry_price=p_setup.entry_price,
+                                        stop_loss=p_setup.stop_loss,
+                                        target_1=p_setup.target_1,
+                                        target_2=p_setup.target_2,
+                                        target_3=p_setup.target_3,
+                                        quantity=1,
+                                        signal_strength=pick["strength"],
+                                        confidence=pick["confidence"],
+                                        reasons=", ".join(
+                                            pick["reasons"]) if pick["reasons"] else "",
+                                    )
+                                    st.success(f"Trade #{_tid} placed!")
+                                except ValueError as e:
+                                    st.error(str(e))
+                            else:
+                                st.warning("No trade setup available")
+                        st.markdown(
+                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
+                            f'Analyze</a>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.info("No BUY signals found.")
+
             if sells:
                 st.markdown("---")
-                st.markdown("#### Stocks to Avoid")
-                for pick in sells[:3]:
-                    st.markdown(f"""<div style="background: rgba(212,93,93,0.05); border: 1px solid rgba(212,93,93,0.1); border-radius: 10px;
-                        padding: 12px 18px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <div style="font-size: 14px; font-weight: 700; color: #d45d5d;">{pick['name']}</div>
-                            <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">₹{pick['price']:,.2f}</div>
-                        </div>
-                        <div style="font-size: 11px; font-weight: 700; color: #d45d5d; text-transform: uppercase;">SELL — {pick['strength']}</div>
-                    </div>""", unsafe_allow_html=True)
+                st.markdown('<div style="font-size: 14px; font-weight: 700; color: #d45d5d; margin-bottom: 8px;">▼ SHORT Opportunities</div>', unsafe_allow_html=True)
+                for i, pick in enumerate(sells[:5]):
+                    p_setup = pick.get("setup")
+                    _badge = '<span class="badge-best">Best</span>' if i == 0 else f'<span class="badge-rank">#{i+1}</span>'
+                    _entry_str = f"₹{p_setup.entry_price:,.2f}" if p_setup else "—"
+                    _sl_str = f"₹{p_setup.stop_loss:,.2f}" if p_setup else "—"
+                    _t1_str = f"₹{p_setup.target_1:,.2f}" if p_setup else "—"
+                    _rr_str = f"1:{p_setup.risk_reward_1}" if p_setup else "—"
+                    _ts = pick.get("tech_score", 0)
+                    _fs = pick.get("fund_score", 0)
+                    _ts_color = "#5eb88a" if _ts >= 60 else "#d4a054" if _ts >= 40 else "#d45d5d"
+                    _fs_color = "#5eb88a" if _fs >= 60 else "#d4a054" if _fs >= 40 else "#d45d5d"
 
-            # ── FULL RESULTS TABLES ──
+                    _sw_profit_html = ""
+                    if p_setup:
+                        _sw_ch = calc_angel_one_charges(p_setup.entry_price, p_setup.target_1, 1, "delivery")
+                        _sw_np = _sw_ch["net_profit"]
+                        _sw_np_color = "#5eb88a" if _sw_np > 0 else "#d45d5d"
+                        _sw_np_sign = "+" if _sw_np > 0 else ""
+                        _sw_profit_html = f"""<div style="text-align: center;">
+                                <div style="font-size: 13px; font-weight: 700; color: {_sw_np_color}; font-family: var(--mono);">{_sw_np_sign}₹{_sw_np:,.2f}</div>
+                                <div style="font-size: 12px; color: rgba(255,255,255,0.22);">charges ₹{_sw_ch['total_charges']:.2f}</div>
+                            </div>"""
+
+                    _sw_short_card_col, _sw_short_act_col = st.columns([8, 1], vertical_alignment="center")
+                    with _sw_short_card_col:
+                        st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(212,93,93,0.1); border-radius: 10px;
+                            padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                            <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
+                                {_badge}
+                                <div>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
+                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
+                                           style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+                                                  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+                                                  text-decoration: none; color: rgba(255,255,255,0.5); font-size: 11px;">↗</a>
+                                        <span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d;
+                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span>
+                                    </div>
+                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Entry</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de; font-family: 'JetBrains Mono', monospace;">{_entry_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Target</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #5eb88a; font-family: 'JetBrains Mono', monospace;">{_t1_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Stop Loss</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #d45d5d; font-family: 'JetBrains Mono', monospace;">{_sl_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">R:R</div>
+                                    <div style="font-size: 14px; font-weight: 600; color: #e8e4de;">{_rr_str}</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Tech</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_ts_color};">{_ts}/100</div>
+                                </div>
+                                <div style="text-align: center;">
+                                    <div style="font-size: 12px; color: rgba(255,255,255,0.30); text-transform: uppercase; letter-spacing: 0.5px;">Fund</div>
+                                    <div style="font-size: 14px; font-weight: 700; color: {_fs_color};">{_fs}/100</div>
+                                </div>
+                                {_sw_profit_html}
+                            </div>
+                        </div>""", unsafe_allow_html=True)
+                    with _sw_short_act_col:
+                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
+                        if st.button("Paper Trade", key=f"scr_sw_short_pt_{i}", type="primary", use_container_width=True):
+                            if p_setup:
+                                try:
+                                    _tid = place_trade(
+                                        ticker=pick["ticker"], trade_type="swing",
+                                        direction="SELL",
+                                        entry_price=p_setup.entry_price,
+                                        stop_loss=p_setup.stop_loss,
+                                        target_1=p_setup.target_1,
+                                        target_2=p_setup.target_2,
+                                        target_3=p_setup.target_3,
+                                        quantity=1,
+                                        signal_strength=pick["strength"],
+                                        confidence=pick["confidence"],
+                                        reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
+                                    )
+                                    st.success(f"Trade #{_tid} placed!")
+                                except ValueError as e:
+                                    st.error(str(e))
+                            else:
+                                st.warning("No trade setup available")
+                        st.markdown(
+                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
+                            f'Analyze</a>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+            # All Swing Signals table
             st.markdown("---")
             st.markdown("#### All Swing Signals")
             help_box("<b>Score</b> = Multi-factor composite (Technical 40% + Momentum 20% + Quality 20% + Sentiment 20%). "
@@ -3101,48 +3412,6 @@ if st.session_state["page"] == "home":
                 })
             st.dataframe(pd.DataFrame(table_rows),
                          use_container_width=True, hide_index=True)
-
-            if scalp_res:
-                st.markdown("#### All Scalping Signals")
-                scalp_table = []
-                for r in scalp_res:
-                    sig_emoji = {"LONG": "🟢", "SHORT": "🔴",
-                                 "NO_TRADE": "🟡"}.get(r["signal"], "⚪")
-                    if r["signal"] == "LONG":
-                        sc_ch = calc_angel_one_charges(
-                            r['entry'], r['target_1'], 1)
-                        profit_str = f"{sc_ch['net_profit']:.2f}"
-                    elif r["signal"] == "SHORT":
-                        sc_ch = calc_angel_one_charges(
-                            r['target_1'], r['entry'], 1)
-                        profit_str = f"{sc_ch['net_profit']:.2f}"
-                    else:
-                        profit_str = "—"
-                    scalp_table.append({
-                        "Stock": r["name"],
-                        "Price (₹)": f"{r['price']:,.2f}",
-                        "Signal": f"{sig_emoji} {r['signal']}",
-                        "Entry (₹)": f"{r['entry']:,.2f}",
-                        "Target 1 (₹)": f"{r['target_1']:,.2f}",
-                        "SL (₹)": f"{r['stop_loss']:,.2f}",
-                        "Profit/share (₹)": profit_str,
-                        "R:R": f"{r['risk_reward']}",
-                        "Scalpability": f"{r['scalpability']}/100",
-                        "Trend": r["trend"],
-                    })
-                st.dataframe(pd.DataFrame(scalp_table),
-                             use_container_width=True, hide_index=True)
-
-            swing_summary = f"{len(buys)} BUY | {len(sells)} SELL | {len(holds)} HOLD"
-            scalp_longs_count = len(
-                [r for r in scalp_res if r["signal"] == "LONG"])
-            scalp_shorts_count = len(
-                [r for r in scalp_res if r["signal"] == "SHORT"])
-            scalp_no_count = len(
-                [r for r in scalp_res if r["signal"] == "NO_TRADE"])
-            scalp_summary = f"{scalp_longs_count} LONG | {scalp_shorts_count} SHORT | {scalp_no_count} NO_TRADE"
-            st.markdown(
-                f"**Swing:** {swing_summary} out of {len(results)} stocks | **Scalp:** {scalp_summary} out of {len(scalp_res)} stocks")
 
 
 # ========================================================================
