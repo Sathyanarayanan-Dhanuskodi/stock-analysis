@@ -1693,7 +1693,11 @@ if st.session_state["page"] == "analysis":
             st.session_state.pop("scalp_data", None)
             st.session_state.pop("scalp_data_ticker", None)
 
-        if scalp_btn:
+        # Auto-load when arriving from screener Analyze link (?tab=scalp)
+        _auto_load_scalp = (st.query_params.get("tab") == "scalp"
+                            and "scalp_data" not in st.session_state)
+
+        if scalp_btn or _auto_load_scalp:
             with st.spinner("Fetching 5-min candles..."):
                 try:
                     idf = fetch_intraday_data(
@@ -1867,10 +1871,11 @@ if st.session_state["page"] == "analysis":
                 p2_class = "profit" if t2_charges["net_profit"] > 0 else "loss"
 
                 # --- TRADE SETUP CARD ---
+                _entry_label = "Entry (Sell)" if ss.signal == "SHORT" else "Entry (Buy)"
                 st.markdown(f"""<div class='setup-card' style='border-left: none; padding: 14px 16px;'>
                     <div style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 10px;">Trade Setup</div>
                     <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
-                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Entry</span>
+                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">{_entry_label}</span>
                         <span style="font-size: 13px; font-weight: 700; color: #e8e4de; font-family: var(--mono);">₹{ss.entry_price:,.2f}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
@@ -1899,10 +1904,11 @@ if st.session_state["page"] == "analysis":
                 </div>""", unsafe_allow_html=True)
 
                 # --- TARGETS CARD ---
+                _tgt_suffix = " (Buy back)" if ss.signal == "SHORT" else ""
                 st.markdown(f"""<div class='setup-card' style='border-left: none; padding: 14px 16px;'>
                     <div style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 10px;">Targets</div>
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
-                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Target 1</span>
+                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Target 1{_tgt_suffix}</span>
                         <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{ss.target_1:,.2f}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
@@ -1910,7 +1916,7 @@ if st.session_state["page"] == "analysis":
                         <span style="font-size: 11px; color: rgba(255,255,255,0.28);">Net: <span class='{p1_class}' style="font-size: 11px;">₹{t1_charges['net_profit']:,.2f}</span> <span style="color: rgba(255,255,255,0.2);">(charges ₹{t1_charges['total_charges']:.2f})</span></span>
                     </div>
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">
-                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Target 2</span>
+                        <span style="font-size: 12px; color: rgba(255,255,255,0.5);">Target 2{_tgt_suffix}</span>
                         <span style="font-size: 13px; font-weight: 700; color: #5eb88a; font-family: var(--mono);">₹{ss.target_2:,.2f}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; padding: 2px 0 6px 0;">

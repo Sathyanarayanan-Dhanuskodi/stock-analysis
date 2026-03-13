@@ -371,10 +371,12 @@ def compute_adaptive_weights(ticker: str, lookback: int = 30) -> float:
     if len(rows) < 10:
         return 0.55  # Default, not enough data
 
-    lstm_errors = [abs(r["lstm_price"] - r["actual_price"]) / r["actual_price"]
-                   for r in rows if r["actual_price"] > 0]
-    xgb_errors = [abs(r["xgb_price"] - r["actual_price"]) / r["actual_price"]
-                  for r in rows if r["actual_price"] > 0]
+    lstm_errors = [abs(float(r["lstm_price"]) - float(r["actual_price"])) / float(r["actual_price"])
+                   for r in rows if r["actual_price"] and isinstance(r["actual_price"], (int, float)) and r["actual_price"] > 0
+                   and isinstance(r["lstm_price"], (int, float))]
+    xgb_errors = [abs(float(r["xgb_price"]) - float(r["actual_price"])) / float(r["actual_price"])
+                  for r in rows if r["actual_price"] and isinstance(r["actual_price"], (int, float)) and r["actual_price"] > 0
+                  and isinstance(r["xgb_price"], (int, float))]
 
     if not lstm_errors or not xgb_errors:
         return 0.55
