@@ -176,7 +176,7 @@ def place_trade(
     Higher targets are still tracked as hit/not-hit for history.
     """
     now = datetime.now()
-    if trade_type == "scalp":
+    if trade_type in ("scalp", "day_trade"):
         today_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
         expiry = today_close if now <= today_close else (now + timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
     else:
@@ -184,7 +184,7 @@ def place_trade(
 
     position_value = entry_price * quantity
     # Scalp trades get 5x leverage (intraday margin) — only 20% margin needed
-    if trade_type == "scalp":
+    if trade_type in ("scalp", "day_trade"):
         capital_used = position_value / 5
     else:
         capital_used = position_value
