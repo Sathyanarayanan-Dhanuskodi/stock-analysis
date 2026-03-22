@@ -72,7 +72,7 @@ SECTOR_STOCKS = {
 }
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
     """Fetch historical OHLCV data for a given stock ticker."""
     end_date = datetime.now()
@@ -92,7 +92,7 @@ def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
     """Fetch Nifty 50 and India VIX data for market context features."""
     end_date = datetime.now()
@@ -129,7 +129,7 @@ def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
     return result
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.DataFrame:
     """Fetch Close prices for multiple tickers, aligned on common dates."""
     if isinstance(tickers, list):
@@ -158,7 +158,7 @@ def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.Da
     return prices
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_stock_info(ticker: str) -> dict:
     """Get basic stock information."""
     stock = yf.Ticker(ticker)
@@ -183,7 +183,7 @@ def get_stock_info(ticker: str) -> dict:
     }
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_stock_news(ticker: str) -> list[dict]:
     """Get recent news for a stock ticker."""
     stock = yf.Ticker(ticker)
@@ -199,7 +199,7 @@ def get_stock_news(ticker: str) -> list[dict]:
     return results
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_intraday_data(ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
     """Fetch intraday OHLCV data for scalping analysis.
 
