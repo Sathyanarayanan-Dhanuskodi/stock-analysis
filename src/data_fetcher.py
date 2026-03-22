@@ -190,12 +190,18 @@ def get_stock_news(ticker: str) -> list[dict]:
     news = _yf_retry(lambda: stock.news) or []
     results = []
     for item in news[:10]:
-        results.append({
-            "title": item.get("title", ""),
-            "publisher": item.get("publisher", ""),
-            "link": item.get("link", ""),
-            "published": item.get("providerPublishTime", ""),
-        })
+        content = item.get("content", {})
+        if content:
+            title = content.get("title", "")
+            publisher = (content.get("provider") or {}).get("displayName", "")
+            link = (content.get("canonicalUrl") or {}).get("url", "")
+            published = content.get("pubDate", "")
+        else:
+            title = item.get("title", "")
+            publisher = item.get("publisher", "")
+            link = item.get("link", "")
+            published = item.get("providerPublishTime", "")
+        results.append({"title": title, "publisher": publisher, "link": link, "published": published})
     return results
 
 
@@ -323,3 +329,45 @@ def scan_swing_opportunities(tickers: list[str]) -> list[dict]:
             continue
     results.sort(key=lambda x: x["confidence"], reverse=True)
     return results
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ohlol_stats(ticker: str, lookback_days: int = 252) -> dict:
+    df = fetch_stock_data(ticker, period_years=2)
+    if df is None or df.empty or len(df) < 10:
+        return {"oh_days": 0, "oh_bearish_rate": 0.0, "ol_days": 0, "ol_bullish_rate": 0.0}
+    df = df.tail(lookback_days).copy()
+    tolerance = 0.001
+    oh_mask = (df["High"] - df["Open"]).abs() / df["Open"] <= tolerance
+    ol_mask = (df["Low"] - df["Open"]).abs() / df["Open"] <= tolerance
+    oh_days = oh_mask.sum()
+    ol_days = ol_mask.sum()
+    oh_bearish = ((df["Close"] < df["Open"]) & oh_mask).sum()
+    ol_bullish = ((df["Close"] > df["Open"]) & ol_mask).sum()
+    return {
+        "oh_days": int(oh_days),
+        "oh_bearish_rate": round(oh_bearish / oh_days * 100, 1) if oh_days > 0 else 0.0,
+        "ol_days": int(ol_days),
+        "ol_bullish_rate": round(ol_bullish / ol_days * 100, 1) if ol_days > 0 else 0.0,
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_gap_fill_stats(ticker: str, lookback_days: int = 252) -> dict:
+    df = fetch_stock_data(ticker, period_years=2)
+    if df is None or df.empty or len(df) < 10:
+        return {"gap_up_count": 0, "gap_up_fill_rate": 0.0, "gap_down_count": 0, "gap_down_fill_rate": 0.0}
+    df = df.tail(lookback_days).copy()
+    prev_close = df["Close"].shift(1)
+    gap_up_mask = df["Open"] > prev_close * 1.005
+    gap_down_mask = df["Open"] < prev_close * 0.995
+    gap_up_filled = gap_up_mask & (df["Low"] <= prev_close)
+    gap_down_filled = gap_down_mask & (df["High"] >= prev_close)
+    gu = gap_up_mask.sum()
+    gd = gap_down_mask.sum()
+    return {
+        "gap_up_count": int(gu),
+        "gap_up_fill_rate": round(gap_up_filled.sum() / gu * 100, 1) if gu > 0 else 0.0,
+        "gap_down_count": int(gd),
+        "gap_down_fill_rate": round(gap_down_filled.sum() / gd * 100, 1) if gd > 0 else 0.0,
+    }

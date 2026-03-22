@@ -9,6 +9,10 @@ def is_sentiment_available() -> bool:
     return bool(os.getenv("ANTHROPIC_API_KEY"))
 
 
+def is_groq_available() -> bool:
+    return bool(os.getenv("GROQ_API_KEY"))
+
+
 def analyze_sentiment(news_items: list[dict]) -> dict | None:
     """
     Analyze sentiment of stock news using Claude API.
@@ -58,6 +62,45 @@ DETAILS:
     )
 
     return _parse_sentiment_response(message.content[0].text, news_items)
+
+
+def analyze_sentiment_groq(news_items: list[dict]) -> dict | None:
+    if not is_groq_available() or not news_items:
+        return None
+
+    from groq import Groq
+
+    headlines = "\n".join(
+        f"- {item['title']} (Source: {item['publisher']})"
+        for item in news_items if item.get("title")
+    )
+    if not headlines.strip():
+        return None
+
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        max_tokens=512,
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Analyze the sentiment of these stock news headlines for an Indian market stock.
+Rate the overall sentiment and each headline.
+
+Headlines:
+{headlines}
+
+Respond in this exact format (no markdown, no extra text):
+OVERALL: [Bullish/Bearish/Neutral]
+SCORE: [float from -1.0 to 1.0]
+SUMMARY: [1-2 sentence analysis]
+DETAILS:
+- [headline]: [Bullish/Bearish/Neutral]
+""",
+            }
+        ],
+    )
+    return _parse_sentiment_response(response.choices[0].message.content, news_items)
 
 
 def _parse_sentiment_response(response: str, news_items: list[dict]) -> dict:

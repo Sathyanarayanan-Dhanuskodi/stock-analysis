@@ -107,6 +107,23 @@ def init_paper_db():
         except sqlite3.OperationalError:
             pass
 
+    # Migrate: add setup_type and tags columns for trade journaling
+    try:
+        conn.execute("SELECT setup_type FROM paper_trades LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN setup_type TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
+    try:
+        conn.execute("SELECT tags FROM paper_trades LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN tags TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_status ON paper_trades(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pt_ticker ON paper_trades(ticker, trade_type)")
     conn.commit()
@@ -150,6 +167,8 @@ def place_trade(
     reasons: str = "",
     notes: str = "",
     exit_target: str = "T1",
+    setup_type: str = "",
+    tags: str = "",
 ) -> int:
     """Place a new paper trade in PENDING state. Returns the trade ID.
 
@@ -190,13 +209,15 @@ def place_trade(
             target_1, target_2, target_3, quantity, capital_used,
             status, entry_hit, t1_hit, t2_hit, t3_hit, sl_hit,
             highest_price, lowest_price, opened_at, expiry_at,
-            signal_strength, confidence, reasons, notes, exit_target)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            signal_strength, confidence, reasons, notes, exit_target,
+            setup_type, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ticker, trade_type, direction, entry_price, stop_loss,
             target_1, target_2, target_3, quantity, capital_used,
             entry_price, entry_price, now.isoformat(), expiry.isoformat(),
             signal_strength, confidence, reasons, notes, exit_target,
+            setup_type, tags,
         ),
     )
     conn.commit()

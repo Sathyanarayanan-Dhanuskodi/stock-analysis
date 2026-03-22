@@ -1,5 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
@@ -8,8 +9,14 @@ from src.data_fetcher import (
     POPULAR_INDIAN_STOCKS, SECTOR_STOCKS, fetch_stock_data, get_stock_info,
     get_stock_news, fetch_multiple_stocks,
     fetch_intraday_data, get_stock_fundamentals,
-    get_sector_for_stock,
+    get_sector_for_stock, get_ohlol_stats, get_gap_fill_stats,
 )
+from src.sentiment import is_groq_available, analyze_sentiment_groq
+from src.open_interest import (
+    fetch_nse_option_chain, calculate_pcr, get_oi_sentiment,
+    get_oi_status, get_oi_status_color, get_total_oi, get_top_strikes,
+)
+from src.seasonality import get_monthly_returns, get_dow_returns, get_monthly_stats
 from src.hedge_trading import calculate_correlation_matrix, calculate_sharpe_ratio
 from src.charges import calc_angel_one_charges
 from src.feature_engineering import add_technical_indicators
@@ -750,6 +757,29 @@ def compute_fundamental_score(fund: dict) -> int:
 # ============================================================
 # FETCH DATA (analysis page only)
 # ============================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_ai_trend(ticker: str) -> str:
+    result = predict_with_saved_model(ticker)
+    if not result:
+        return ""
+    last = result["last_price"]
+    nxt = result["predictions"][0]
+    chg = (nxt - last) / max(last, 0.01)
+    if chg > 0.003:
+        return "UP"
+    elif chg < -0.003:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_tab_sentiment(ticker: str) -> dict | None:
+    if not is_groq_available():
+        return None
+    news = get_stock_news(ticker)
+    return analyze_sentiment_groq(news) if news else None
+
+
 if st.session_state["page"] == "analysis":
     if st.session_state.get("analysis_ticker"):
         ticker = st.session_state["analysis_ticker"]
@@ -835,8 +865,77 @@ if st.session_state["page"] == "analysis":
     _hdr_tech_label = "Strong" if _hdr_tech >= 60 else "Moderate" if _hdr_tech >= 40 else "Weak"
     _hdr_fund_label = "Strong" if _hdr_fund >= 60 else "Moderate" if _hdr_fund >= 40 else "Weak"
 
+    # ---- Seasonality + Sentiment precompute for header / stat cards ----
+    from datetime import datetime as _hdr_dt
+    _hdr_now = _hdr_dt.now()
+    _hdr_month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    _hdr_month_name = _hdr_month_names[_hdr_now.month - 1]
+    _hdr_dow_name = _hdr_now.strftime("%A")
+
+    _hdr_best_month = ""
+    _hdr_best_month_ret = 0.0
+    _hdr_this_month_avg: float | None = None
+    _hdr_this_month_pos: float | None = None
+    try:
+        _hdr_mon_df = get_monthly_stats(ticker)
+        if not _hdr_mon_df.empty:
+            _bm = _hdr_mon_df.loc[_hdr_mon_df["AvgReturn"].idxmax()]
+            _hdr_best_month = str(_bm["MonthName"])
+            _hdr_best_month_ret = float(_bm["AvgReturn"])
+            _mr = _hdr_mon_df[_hdr_mon_df["MonthName"] == _hdr_month_name]
+            if not _mr.empty:
+                _hdr_this_month_avg = float(_mr["AvgReturn"].iloc[0])
+                _hdr_this_month_pos = float(_mr["PositiveRate"].iloc[0])
+    except Exception:
+        pass
+
+    _hdr_best_day = ""
+    _hdr_best_day_ret = 0.0
+    _hdr_today_avg: float | None = None
+    try:
+        _hdr_dow_df = get_dow_returns(ticker)
+        if not _hdr_dow_df.empty:
+            _bd = _hdr_dow_df.loc[_hdr_dow_df["AvgReturn"].idxmax()]
+            _hdr_best_day = str(_bd["Day"])[:3].upper()
+            _hdr_best_day_ret = float(_bd["AvgReturn"])
+            _dr = _hdr_dow_df[_hdr_dow_df["Day"] == _hdr_dow_name]
+            if not _dr.empty:
+                _hdr_today_avg = float(_dr["AvgReturn"].iloc[0])
+    except Exception:
+        pass
+
+    _hdr_sentiment = _get_tab_sentiment(ticker)
+    _hdr_sent_str = _hdr_sentiment["overall"] if _hdr_sentiment else ""
+    _hdr_sent_color = {"Bullish": "#5eb88a", "Bearish": "#d45d5d", "Neutral": "#d4a054"}.get(_hdr_sent_str, "#d4a054")
+    _hdr_sent_icon = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}.get(_hdr_sent_str, "")
+
+    _hdr_gap_today = ""
+    if len(raw_df) >= 2:
+        _g = (raw_df["Open"].iloc[-1] - raw_df["Close"].iloc[-2]) / max(raw_df["Close"].iloc[-2], 0.01)
+        if _g > 0.005:
+            _hdr_gap_today = "gap_up"
+        elif _g < -0.005:
+            _hdr_gap_today = "gap_down"
+    _hdr_ai_trend = _get_ai_trend(ticker)
+
     def _render_stock_header():
         """Render stock banner + indicators row inside any tab."""
+        _hq = '<span title="{t}" style="cursor:help;background:{bg};border:1px solid {br};color:{c};font-size:11px;font-weight:700;padding:2px 8px;border-radius:5px;">{lbl}</span>'
+        if _hdr_gap_today == "gap_up":
+            _hdr_gap_badge = _hq.format(t="Gap Up: Today opened higher than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(212,93,93,0.1)", br="rgba(212,93,93,0.25)", c="#f87171", lbl="Gap Up ↑")
+        elif _hdr_gap_today == "gap_down":
+            _hdr_gap_badge = _hq.format(t="Gap Down: Today opened lower than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(94,184,138,0.1)", br="rgba(94,184,138,0.25)", c="#34d399", lbl="Gap Down ↓")
+        else:
+            _hdr_gap_badge = ""
+        if _hdr_ai_trend == "UP":
+            _hdr_ai_badge = _hq.format(t="AI Prediction: The ML model (LSTM neural network + XGBoost) predicts the price will move UP in the next session by more than 0.3%.", bg="rgba(94,184,138,0.1)", br="rgba(94,184,138,0.25)", c="#34d399", lbl="AI ↑ UP")
+        elif _hdr_ai_trend == "DOWN":
+            _hdr_ai_badge = _hq.format(t="AI Prediction: The ML model (LSTM neural network + XGBoost) predicts the price will move DOWN in the next session by more than 0.3%.", bg="rgba(212,93,93,0.1)", br="rgba(212,93,93,0.25)", c="#f87171", lbl="AI ↓ DOWN")
+        elif _hdr_ai_trend == "NEUTRAL":
+            _hdr_ai_badge = _hq.format(t="AI Prediction: The ML model sees no strong directional signal for the next session.", bg="rgba(212,160,84,0.1)", br="rgba(212,160,84,0.25)", c="#d4a054", lbl="AI → NEUTRAL")
+        else:
+            _hdr_ai_badge = ""
+        _price_extra = _hdr_gap_badge + _hdr_ai_badge
         st.markdown(f"""<div class="stock-header">
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
             <div>
@@ -866,8 +965,7 @@ if st.session_state["page"] == "analysis":
                     <span style="background: rgba(232,228,222,0.08); border: 1px solid rgba(232,228,222,0.12); padding: 3px 10px; border-radius: 6px;">
                         <span style="font-size: 10px; color: rgba(255,255,255,0.4); font-weight: 600;">C </span>
                         <span style="font-size: 12px; font-weight: 700; color: #e8e4de; font-family: 'JetBrains Mono', monospace;">₹{today_close:,.2f}</span>
-                    </span>
-                </div>
+                    </span>{_price_extra}</div>
             </div>
             <div style="display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
                 <div style="text-align: center;">
@@ -878,6 +976,9 @@ if st.session_state["page"] == "analysis":
                     <div style="font-size: 9px; color: rgba(255,255,255,0.22); text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">5-Day</div>
                     <div style="font-size: 13px; font-weight: 700; color: {trend_5d_color_light}; margin-top: 3px; font-family: 'JetBrains Mono', monospace;">{trend_5d_arrow} {trend_5d_pct:+.1f}%</div>
                 </div>
+                {f'<div style="text-align: center;"><div style="font-size: 9px; color: rgba(255,255,255,0.22); text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Best Month</div><div style="font-size: 13px; font-weight: 700; color: #5eb88a; margin-top: 3px; font-family: \'JetBrains Mono\', monospace;">{_hdr_best_month} {_hdr_best_month_ret:+.1f}%</div></div>' if _hdr_best_month else ''}
+                {f'<div style="text-align: center;"><div style="font-size: 9px; color: rgba(255,255,255,0.22); text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Best Day</div><div style="font-size: 13px; font-weight: 700; color: #5eb88a; margin-top: 3px; font-family: \'JetBrains Mono\', monospace;">{_hdr_best_day} {_hdr_best_day_ret:+.1f}%</div></div>' if _hdr_best_day else ''}
+                {f'<div style="text-align: center;"><div style="font-size: 9px; color: rgba(255,255,255,0.22); text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Sentiment</div><div style="font-size: 13px; font-weight: 700; color: {_hdr_sent_color}; margin-top: 3px;">{_hdr_sent_icon} {_hdr_sent_str}</div></div>' if _hdr_sent_str else ''}
             </div>
         </div>
         <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.04);">
@@ -917,48 +1018,186 @@ if st.session_state["page"] == "analysis":
 
     def _render_indicators_row():
         """Render RSI/MACD/ADX/Volume indicator cards."""
+        _mc = "#5eb88a" if (_hdr_this_month_avg or 0) > 0.5 else "#d45d5d" if (_hdr_this_month_avg or 0) < -0.5 else "#d4a054"
+        _ml = "Good" if (_hdr_this_month_avg or 0) > 0.5 else "Weak" if (_hdr_this_month_avg or 0) < -0.5 else "Avg"
+        _pos_str = f" | {_hdr_this_month_pos:.0f}% bull" if _hdr_this_month_pos is not None else ""
+        _dc = "#5eb88a" if (_hdr_today_avg or 0) > 0.05 else "#d45d5d" if (_hdr_today_avg or 0) < -0.05 else "#d4a054"
+        _dl = "Favorable" if (_hdr_today_avg or 0) > 0.05 else "Weak" if (_hdr_today_avg or 0) < -0.05 else "Neutral"
+        _qs_month_card = ""
+        _qs_day_card = ""
+        _tip = '<span title="{t}" style="cursor:help;color:rgba(255,255,255,0.28);font-size:8px;border:1px solid rgba(255,255,255,0.15);border-radius:50%;padding:0 3px;margin-left:3px;line-height:1.4;">?</span>'
+        if _hdr_gap_today == "gap_up":
+            _gap_lbl, _gap_val, _gap_c = "Gap Up ↑", f"+{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#f87171"
+        elif _hdr_gap_today == "gap_down":
+            _gap_lbl, _gap_val, _gap_c = "Gap Down ↓", f"-{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#34d399"
+        else:
+            _gap_lbl, _gap_val, _gap_c = "No Gap", "—", "rgba(255,255,255,0.3)"
+        _gap_tip = _tip.format(t="Gap = difference between today's Open and yesterday's Close. A Gap Up means the stock jumped up at open. Gap Up often reverses (fills back) during the day.")
+        _ai_icon = {"UP": "↑ UP", "DOWN": "↓ DOWN", "NEUTRAL": "→ NEUTRAL"}.get(_hdr_ai_trend, "N/A")
+        _ai_c = {"UP": "#34d399", "DOWN": "#f87171", "NEUTRAL": "#d4a054"}.get(_hdr_ai_trend, "rgba(255,255,255,0.3)")
+        _ai_tip = _tip.format(t="AI Signal: Machine learning model (LSTM neural network + XGBoost) trained on historical price data. UP = expects >0.3% rise next session, DOWN = >0.3% fall, NEUTRAL = unclear direction.")
+        _qs_gap_card = f'<div class="quick-stat"><div class="qs-label">Gap{_gap_tip}</div><div class="qs-value" style="color:{_gap_c};">{_gap_val}</div><div class="qs-delta" style="color:{_gap_c};">{_gap_lbl}</div></div>'
+        _qs_ai_card = f'<div class="quick-stat"><div class="qs-label">AI Signal{_ai_tip}</div><div class="qs-value" style="color:{_ai_c};font-size:16px;">{_ai_icon}</div><div class="qs-delta" style="color:{_ai_c};">ML Prediction</div></div>' if _hdr_ai_trend else ""
+        _rsi_tip = _tip.format(t="RSI (Relative Strength Index): Measures if a stock is overbought or oversold. Above 70 = likely to fall soon (overbought). Below 30 = likely to rise soon (oversold). 30-70 = neutral.")
+        _macd_tip = _tip.format(t="MACD (Moving Average Convergence Divergence): Shows momentum direction. Bullish = upward momentum building. Bearish = downward momentum building.")
+        _adx_tip = _tip.format(t="ADX (Average Directional Index): Measures trend strength, not direction. Above 25 = strong trend (good for trend-following). Below 25 = weak/sideways market.")
+        _vol_tip = _tip.format(t="Volume Ratio: Today's trading volume vs the 20-day average. Above 1.2x = unusually high interest. Below 0.7x = low participation.")
+        _tech_tip = _tip.format(t="Tech Score: Composite score (0-100) combining RSI, MACD, ADX, Bollinger Bands, and moving averages. 60+ = strong technical setup, 40-60 = moderate, below 40 = weak.")
+        _fund_tip = _tip.format(t="Fund Score: Fundamental score (0-100) based on PE ratio, earnings growth, debt levels, and profitability. 60+ = strong fundamentals.")
+        _month_tip = _tip.format(t="Seasonality — This Month: Historical average return for this calendar month based on 8 years of data. Shows if this month has been typically bullish or bearish for this stock.")
+        _day_tip = _tip.format(t="Seasonality — Today: Historical average return for this day of the week based on 3 years of data. Shows if today has been a typically favorable trading day for this stock.")
+        if _hdr_this_month_avg is not None:
+            _qs_month_card = f'<div class="quick-stat"><div class="qs-label">This Month ({_hdr_month_name}){_month_tip}</div><div class="qs-value" style="color:{_mc};">{_hdr_this_month_avg:+.2f}%</div><div class="qs-delta" style="color:{_mc};">{_ml}{_pos_str}</div></div>'
+        _day_tip_card = f'<div class="quick-stat"><div class="qs-label">Today ({_hdr_dow_name[:3]}){_day_tip}</div><div class="qs-value" style="color:{_dc};">{_hdr_today_avg:+.2f}%</div><div class="qs-delta" style="color:{_dc};">{_dl}</div></div>' if _hdr_today_avg is not None else ""
+        if _hdr_today_avg is not None:
+            _qs_day_card = _day_tip_card
         st.markdown(f"""<div class="quick-stats">
         <div class="quick-stat">
-            <div class="qs-label">RSI</div>
+            <div class="qs-label">RSI{_rsi_tip}</div>
             <div class="qs-value" style="color: {qs_rsi_color};">{qs_rsi:.0f}</div>
             <div class="qs-delta" style="color: {qs_rsi_color};">{qs_rsi_label}</div>
         </div>
         <div class="quick-stat">
-            <div class="qs-label">MACD</div>
+            <div class="qs-label">MACD{_macd_tip}</div>
             <div class="qs-value" style="color: {qs_macd_color};">{qs_macd:.2f}</div>
             <div class="qs-delta" style="color: {qs_macd_color};">{qs_macd_label}</div>
         </div>
         <div class="quick-stat">
-            <div class="qs-label">ADX</div>
+            <div class="qs-label">ADX{_adx_tip}</div>
             <div class="qs-value">{qs_adx:.0f}</div>
             <div class="qs-delta" style="color: {'#c9b89c' if qs_adx > 25 else 'rgba(255,255,255,0.3)'};">{qs_adx_label} Trend</div>
         </div>
         <div class="quick-stat">
-            <div class="qs-label">Volume</div>
+            <div class="qs-label">Volume{_vol_tip}</div>
             <div class="qs-value" style="color: {qs_vol_color};">{qs_vol:.1f}x</div>
             <div class="qs-delta" style="color: {qs_vol_color};">vs 20d avg</div>
         </div>
         <div class="quick-stat">
-            <div class="qs-label">Tech Score</div>
+            <div class="qs-label">Tech Score{_tech_tip}</div>
             <div class="qs-value" style="color: {_hdr_tech_color};">{_hdr_tech}</div>
             <div class="qs-delta" style="color: {_hdr_tech_color};">{_hdr_tech_label}</div>
         </div>
         <div class="quick-stat">
-            <div class="qs-label">Fund Score</div>
+            <div class="qs-label">Fund Score{_fund_tip}</div>
             <div class="qs-value" style="color: {_hdr_fund_color};">{_hdr_fund}</div>
             <div class="qs-delta" style="color: {_hdr_fund_color};">{_hdr_fund_label}</div>
         </div>
-    </div>""", unsafe_allow_html=True)
+        {_qs_gap_card}{_qs_ai_card}{_qs_month_card}{_qs_day_card}</div>""", unsafe_allow_html=True)
 
 
 # ============================================================
 # TABS — page-dependent tab bar
 # ============================================================
+
+
+def _render_sentiment_seasonality(ticker: str, df_daily) -> None:
+    from datetime import datetime as _dt
+    _today = _dt.now()
+    _dow_name = _today.strftime("%A")
+    _month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    _month_name = _month_names[_today.month - 1]
+
+    _sent = _get_tab_sentiment(ticker)
+    _dow_df = get_dow_returns(ticker)
+    _mon_df = get_monthly_stats(ticker)
+
+    _sent_color = {"Bullish": "#5eb88a", "Bearish": "#d45d5d", "Neutral": "#d4a054"}
+    _sent_icon = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
+
+    _parts = []
+
+    if _sent:
+        _sc = _sent_color.get(_sent["overall"], "#d4a054")
+        _si = _sent_icon.get(_sent["overall"], "🟡")
+        _parts.append(
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+            f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px;">News Sentiment</span>'
+            f'<span style="font-size:12px;font-weight:700;color:{_sc};">{_si} {_sent["overall"]} ({_sent["score"]:+.2f})</span>'
+            f'</div>'
+        )
+        if _sent.get("summary"):
+            _parts.append(f'<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:8px;">{_sent["summary"]}</div>')
+
+    if not _dow_df.empty:
+        _dr = _dow_df[_dow_df["Day"] == _dow_name]
+        if not _dr.empty:
+            _avg = _dr["AvgReturn"].iloc[0]
+            _pos = 100 - _dr["StdDev"].iloc[0] * 0  # placeholder — use AvgReturn direction
+            _dc = "#5eb88a" if _avg > 0.05 else "#d45d5d" if _avg < -0.05 else "#d4a054"
+            _dl = "Favorable" if _avg > 0.05 else "Weak" if _avg < -0.05 else "Neutral"
+            _parts.append(
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">'
+                f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px;">Today ({_dow_name})</span>'
+                f'<span style="font-size:12px;font-weight:700;color:{_dc};">{_dl} — avg {_avg:+.2f}%</span>'
+                f'</div>'
+            )
+
+    if not _mon_df.empty:
+        _mr = _mon_df[_mon_df["MonthName"] == _month_name]
+        if not _mr.empty:
+            _mavg = _mr["AvgReturn"].iloc[0]
+            _mpos = _mr["PositiveRate"].iloc[0]
+            _mc = "#5eb88a" if _mavg > 0.5 else "#d45d5d" if _mavg < -0.5 else "#d4a054"
+            _ml = "Strong month" if _mavg > 0.5 else "Weak month" if _mavg < -0.5 else "Neutral month"
+            _parts.append(
+                f'<div style="display:flex;align-items:center;gap:8px;">'
+                f'<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.8px;">{_month_name}</span>'
+                f'<span style="font-size:12px;font-weight:700;color:{_mc};">{_ml} — avg {_mavg:+.2f}% | bullish {_mpos:.0f}% of years</span>'
+                f'</div>'
+            )
+
+    if _parts:
+        st.markdown(
+            f'<div style="background:#16181e;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:12px 16px;margin-top:10px;">'
+            + "".join(_parts) +
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+
+def _build_pattern_badges(pick: dict) -> str:
+    badges = []
+    ohlol = pick.get("ohlol_today", "")
+    if ohlol == "O=H":
+        badges.append('<span style="background:rgba(212,93,93,0.12);border:1px solid rgba(212,93,93,0.3);color:#f87171;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">O=H ⚠ Bearish Bias</span>')
+    elif ohlol == "O=L":
+        badges.append('<span style="background:rgba(94,184,138,0.12);border:1px solid rgba(94,184,138,0.3);color:#34d399;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">O=L ✓ Bullish Bias</span>')
+    if pick.get("breakout"):
+        badges.append('<span style="background:rgba(212,160,84,0.12);border:1px solid rgba(212,160,84,0.3);color:#d4a054;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Breakout ✓</span>')
+    try:
+        _stats = get_ohlol_stats(pick["ticker"])
+        if ohlol == "O=H" and _stats["oh_days"] >= 5:
+            badges.append(f'<span style="font-size:11px;color:rgba(255,255,255,0.35);">O=H bearish {_stats["oh_bearish_rate"]:.0f}% historically</span>')
+        elif ohlol == "O=L" and _stats["ol_days"] >= 5:
+            badges.append(f'<span style="font-size:11px;color:rgba(255,255,255,0.35);">O=L bullish {_stats["ol_bullish_rate"]:.0f}% historically</span>')
+    except Exception:
+        pass
+    gap = pick.get("gap_today", "")
+    try:
+        _gstats = get_gap_fill_stats(pick["ticker"])
+        if gap == "gap_up" and _gstats["gap_up_count"] >= 5:
+            _gc = "#d45d5d" if _gstats["gap_up_fill_rate"] >= 60 else "#d4a054"
+            badges.append(f'<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Up — fills {_gstats["gap_up_fill_rate"]:.0f}%</span>')
+        elif gap == "gap_down" and _gstats["gap_down_count"] >= 5:
+            _gc = "#5eb88a" if _gstats["gap_down_fill_rate"] >= 60 else "#d4a054"
+            badges.append(f'<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Down — fills {_gstats["gap_down_fill_rate"]:.0f}%</span>')
+    except Exception:
+        pass
+    ai_trend = pick.get("ai_trend", "")
+    if ai_trend:
+        _atc = "#5eb88a" if ai_trend == "UP" else "#d45d5d" if ai_trend == "DOWN" else "#d4a054"
+        _ati = "↑" if ai_trend == "UP" else "↓" if ai_trend == "DOWN" else "→"
+        badges.append(f'<span style="background:rgba(155,142,196,0.1);border:1px solid rgba(155,142,196,0.25);color:{_atc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">AI {_ati} {ai_trend}</span>')
+    if not badges:
+        return ""
+    return f'<span style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">{"".join(badges)}</span>'
+
+
 if st.session_state["page"] == "home":
     st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
-    _HOME_TAB_NAMES = ["Scalping Screener", "Swing Screener", "Paper Trading", "Accuracy"]
-    _HOME_TAB_KEYS = ["scalp_screener", "swing_screener", "paper", "accuracy"]
-    tab_scalp_scr, tab_swing_scr, tab_paper, tab_accuracy = st.tabs(_HOME_TAB_NAMES)
+    _HOME_TAB_NAMES = ["Scalping Screener", "Swing Screener", "Paper Trading", "Accuracy", "Seasonality", "Open Interest"]
+    _HOME_TAB_KEYS = ["scalp_screener", "swing_screener", "paper", "accuracy", "seasonality", "open_interest"]
+    tab_scalp_scr, tab_swing_scr, tab_paper, tab_accuracy, tab_seasonality, tab_oi = st.tabs(_HOME_TAB_NAMES)
 
     # Auto-switch tab from URL query param (?tab=screener)
     _qp_tab = st.query_params.get("tab")
@@ -1404,6 +1643,23 @@ if st.session_state["page"] == "analysis":
             action_card(f"Signal: {signal.signal} — {signal.strength}",
                         f"Confidence: {signal.confidence * 100:.0f}% — {sig_advice.get(signal.signal, '')}", sig_class.get(signal.signal, "action-hold"))
 
+            _sw_tolerance = 0.001
+            _sw_last = df.iloc[-1]
+            _sw_ohlol = ""
+            if abs(_sw_last["High"] - _sw_last["Open"]) / _sw_last["Open"] <= _sw_tolerance:
+                _sw_ohlol = "O=H"
+            elif abs(_sw_last["Low"] - _sw_last["Open"]) / _sw_last["Open"] <= _sw_tolerance:
+                _sw_ohlol = "O=L"
+            _sw_20h = df["High"].tail(20).max()
+            _sw_avg_vol = df["Volume"].tail(20).mean()
+            _sw_breakout = bool(_sw_last["Close"] > _sw_20h and _sw_last["Volume"] > _sw_avg_vol * 1.5)
+            _sw_pick = {"ticker": ticker, "ohlol_today": _sw_ohlol, "breakout": _sw_breakout}
+            _sw_pb = _build_pattern_badges(_sw_pick)
+            if _sw_pb:
+                st.markdown(_sw_pb, unsafe_allow_html=True)
+
+            _render_sentiment_seasonality(ticker, df)
+
             if signal.reasons:
                 checklist([(r, any(w in r.lower() for w in ["bullish", "above", "bounce",
                           "oversold", "upward", "positive"])) for r in signal.reasons])
@@ -1758,6 +2014,26 @@ if st.session_state["page"] == "analysis":
                     scalp_class.get(ss.signal, "action-notrade"),
                 )
 
+                _sc_tolerance = 0.001
+                _sc_last = idf.iloc[-1]
+                _sc_sess_high = idf["High"].max()
+                _sc_sess_low = idf["Low"].min()
+                _sc_open = idf["Open"].iloc[0]
+                _sc_ohlol = ""
+                if abs(_sc_sess_high - _sc_open) / _sc_open <= _sc_tolerance:
+                    _sc_ohlol = "O=H"
+                elif abs(_sc_sess_low - _sc_open) / _sc_open <= _sc_tolerance:
+                    _sc_ohlol = "O=L"
+                _sc_20h = df["High"].tail(20).max()
+                _sc_avg_vol = df["Volume"].tail(20).mean()
+                _sc_breakout = bool(df["Close"].iloc[-1] > _sc_20h and df["Volume"].iloc[-1] > _sc_avg_vol * 1.5)
+                _sc_pick = {"ticker": ticker, "ohlol_today": _sc_ohlol, "breakout": _sc_breakout}
+                _sc_pb = _build_pattern_badges(_sc_pick)
+                if _sc_pb:
+                    st.markdown(_sc_pb, unsafe_allow_html=True)
+
+                _render_sentiment_seasonality(ticker, df)
+
                 # Market time warnings
                 if is_weekday and market_open <= now_ist <= market_close:
                     mins_left = int(
@@ -1974,7 +2250,6 @@ if st.session_state["page"] == "analysis":
                                     f"Trade #{tid} placed! Exit at {_sc_exit} | ₹{ss.entry_price:,.2f} × {scalp_qty}")
                             except ValueError as e:
                                 st.error(str(e))
-                        st.markdown('</div>', unsafe_allow_html=True)
                 else:
                     st.markdown("""<div class="empty-state" style="padding: 16px;">
                         <div class="es-icon" style="font-size: 24px;">⏸️</div>
@@ -2576,14 +2851,19 @@ if st.session_state["page"] == "analysis":
     with tab_sentiment:
         _render_stock_header()
         _render_indicators_row()
-        help_box("Get AI-powered sentiment analysis for this stock. <b>Step 1:</b> Fetch news & generate a prompt. "
-                 "<b>Step 2:</b> Copy the prompt and paste it into ChatGPT or Claude. "
-                 "<b>Step 3:</b> Paste the AI's response back here to see the analysis.")
+
+        _groq_on = is_groq_available()
+        if _groq_on:
+            help_box("Groq AI is active — news sentiment is analyzed automatically in one click.")
+        else:
+            help_box("Get AI-powered sentiment analysis for this stock. <b>Step 1:</b> Fetch news & generate a prompt. "
+                     "<b>Step 2:</b> Copy the prompt and paste it into ChatGPT or Claude. "
+                     "<b>Step 3:</b> Paste the AI's response back here to see the analysis.")
 
         sent_col1, sent_col2 = st.columns([3, 1])
         with sent_col1:
-            fetch_news_btn = st.button(
-                "📰 Step 1: Fetch News & Generate Prompt", type="primary", use_container_width=True)
+            _btn_label = "⚡ Analyze Sentiment" if _groq_on else "📰 Step 1: Fetch News & Generate Prompt"
+            fetch_news_btn = st.button(_btn_label, type="primary", use_container_width=True)
         with sent_col2:
             clear_sent = st.button("🗑️ Clear", use_container_width=True)
 
@@ -2596,16 +2876,27 @@ if st.session_state["page"] == "analysis":
             with st.spinner("Fetching news..."):
                 news = get_stock_news(ticker)
             if not news:
-                st.warning(
-                    "No recent news found for this stock. Try a different stock.")
+                st.warning("No recent news found for this stock. Try a different stock.")
             else:
                 st.session_state["sentiment_news"] = news
-                headlines = "\n".join(
-                    f"- {item['title']} (Source: {item['publisher']})"
-                    for item in news if item.get("title")
-                )
-                stock_name = info.get("name", ticker)
-                prompt = f"""Analyze the sentiment of these stock news headlines for {stock_name} ({ticker}), an Indian stock market company.
+                if _groq_on:
+                    try:
+                        with st.spinner("Analyzing sentiment with Groq AI..."):
+                            _groq_result = analyze_sentiment_groq(news)
+                        if _groq_result:
+                            st.session_state["sentiment_result"] = _groq_result
+                            st.rerun()
+                        else:
+                            st.warning("Groq analysis failed. Try the manual method below.")
+                    except Exception as _ge:
+                        st.error(f"Groq error: {_ge}")
+                else:
+                    headlines = "\n".join(
+                        f"- {item['title']} (Source: {item['publisher']})"
+                        for item in news if item.get("title")
+                    )
+                    stock_name = info.get("name", ticker)
+                    prompt = f"""Analyze the sentiment of these stock news headlines for {stock_name} ({ticker}), an Indian stock market company.
 
     Rate the overall sentiment and each headline individually.
 
@@ -2618,9 +2909,9 @@ if st.session_state["page"] == "analysis":
     SUMMARY: [1-2 sentence analysis]
     DETAILS:
     - [headline]: [Bullish/Bearish/Neutral]"""
-                st.session_state["sentiment_prompt"] = prompt
+                    st.session_state["sentiment_prompt"] = prompt
 
-        if "sentiment_prompt" in st.session_state:
+        if not _groq_on and "sentiment_prompt" in st.session_state:
             st.markdown("#### Step 1 Complete — Copy this prompt:")
             st.markdown(
                 f"<div class='prompt-box'>{st.session_state['sentiment_prompt']}</div>", unsafe_allow_html=True)
@@ -2642,8 +2933,7 @@ if st.session_state["page"] == "analysis":
                 if ai_response.strip():
                     from src.sentiment import _parse_sentiment_response
                     news = st.session_state.get("sentiment_news", [])
-                    sentiment = _parse_sentiment_response(
-                        ai_response.strip(), news)
+                    sentiment = _parse_sentiment_response(ai_response.strip(), news)
                     st.session_state["sentiment_result"] = sentiment
                 else:
                     st.warning("Please paste the AI response first.")
@@ -2713,6 +3003,42 @@ if st.session_state["page"] == "home":
                             _sc_fund = compute_fundamental_score(_sc_fund_data)
                         except Exception:
                             pass
+                        _ohlol_today = ""
+                        try:
+                            _today = intra_df.index.normalize().max()
+                            _today_c = intra_df[intra_df.index.normalize() == _today]
+                            if not _today_c.empty:
+                                _tol = 0.001
+                                _f_open = _today_c.iloc[0]["Open"]
+                                _t_high = _today_c["High"].max()
+                                _t_low = _today_c["Low"].min()
+                                if abs(_t_high - _f_open) / max(_f_open, 0.01) <= _tol:
+                                    _ohlol_today = "O=H"
+                                elif abs(_t_low - _f_open) / max(_f_open, 0.01) <= _tol:
+                                    _ohlol_today = "O=L"
+                        except Exception:
+                            pass
+                        _breakout = False
+                        _gap_today = ""
+                        _ai_trend = ""
+                        try:
+                            _daily = fetch_stock_data(t, period_years=1)
+                            if _daily is not None and len(_daily) >= 21:
+                                _20d_high = _daily["High"].iloc[-21:-1].max()
+                                _vol_avg = _daily["Volume"].iloc[-21:-1].mean()
+                                _last_close = _daily["Close"].iloc[-1]
+                                _last_vol = _daily["Volume"].iloc[-1]
+                                _breakout = bool(_last_close > _20d_high and _last_vol > _vol_avg * 1.5)
+                                _prev_close = _daily["Close"].iloc[-2]
+                                _today_open = _daily["Open"].iloc[-1]
+                                _g = (_today_open - _prev_close) / max(_prev_close, 0.01)
+                                if _g > 0.005:
+                                    _gap_today = "gap_up"
+                                elif _g < -0.005:
+                                    _gap_today = "gap_down"
+                            _ai_trend = _get_ai_trend(t)
+                        except Exception:
+                            pass
                         scalp_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -2733,6 +3059,10 @@ if st.session_state["page"] == "home":
                             "scalp_score": int(min(100, s_micro["scalpability_score"] * 0.6 + s_signal.confidence * 40)),
                             "tech_score": compute_tech_score(intra_df.iloc[-1], s_signal.confidence),
                             "fund_score": _sc_fund,
+                            "ohlol_today": _ohlol_today,
+                            "breakout": _breakout,
+                            "gap_today": _gap_today,
+                            "ai_trend": _ai_trend,
                         })
                     except Exception:
                         pass
@@ -2787,7 +3117,7 @@ if st.session_state["page"] == "home":
             scalp_longs_all = [r for r in scalp_res if r["signal"] == "LONG"] if scalp_res else []
             scalp_shorts_all = [r for r in scalp_res if r["signal"] == "SHORT"] if scalp_res else []
             if scalp_longs_all or scalp_shorts_all:
-                st.markdown("#### Top Scalping Picks")
+                st.markdown("#### Top 5 Scalping Picks")
             if scalp_longs_all:
                 st.markdown("<div style='font-size:13px;font-weight:700;color:#5eb88a;margin:6px 0 4px;letter-spacing:0.5px;'>▲ LONG Opportunities</div>", unsafe_allow_html=True)
             for i, pick in enumerate(scalp_longs_all[:5]):
@@ -2813,22 +3143,23 @@ if st.session_state["page"] == "home":
                     _sc_ts_color = "#5eb88a" if _sc_ts >= 60 else "#d4a054" if _sc_ts >= 40 else "#d45d5d"
                     _sc_fs_color = "#5eb88a" if _sc_fs >= 60 else "#d4a054" if _sc_fs >= 40 else "#d45d5d"
 
+                    _gap_v = pick.get("gap_today", "")
+                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _ai_v = pick.get("ai_trend", "")
+                    _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
+                                  else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
+                                  else '<span style="background:rgba(212,160,84,0.1);border:1px solid rgba(212,160,84,0.25);color:#d4a054;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI →</span>' if _ai_v == "NEUTRAL" else "")
+                    _tv_url = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}"
+                    _name_row = f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{pick["name"]}</span><a href="{_tv_url}" target="_blank" title="View on TradingView" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>{_inline_gap}{_inline_ai}</div>'
+
                     _sc_card_col, _sc_act_col = st.columns([8, 1], vertical_alignment="center")
                     with _sc_card_col:
                         st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px;
                             padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                             <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
-                                {_badge}
-                                <div>
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
-                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
-                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
-                                        <span style="background: {_sc_sig_bg}; border: 1px solid {_sc_sig_border}; color: {_sc_sig_color};
-                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">{_sc_sig_label}</span>
-                                    </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
-                                </div>
+                                <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">{_badge}<span style="background: {_sc_sig_bg}; border: 1px solid {_sc_sig_border}; color: {_sc_sig_color}; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: 0.04em;">{_sc_sig_label}</span></div>
+                                <div>{_name_row}<div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div></div>
                             </div>
                             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                                 <div style="text-align: center;">
@@ -2866,31 +3197,7 @@ if st.session_state["page"] == "home":
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sc_act_col:
-                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
-                        if st.button("Paper Trade", key=f"scr_sc_pt_{i}", type="primary", use_container_width=True):
-                            try:
-                                _tid = place_trade(
-                                    ticker=pick["ticker"], trade_type="scalp",
-                                    direction=pick["signal"],
-                                    entry_price=pick["entry"],
-                                    stop_loss=pick["stop_loss"],
-                                    target_1=pick["target_1"],
-                                    target_2=pick["target_2"],
-                                    quantity=1,
-                                    signal_strength=pick["strength"],
-                                    confidence=pick["confidence"],
-                                    reasons=", ".join(
-                                        pick["reasons"]) if pick["reasons"] else "",
-                                )
-                                st.success(f"Trade #{_tid} placed!")
-                            except ValueError as e:
-                                st.error(str(e))
-                        st.markdown(
-                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=scalp" target="_blank">'
-                            f'Analyze</a>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
+                        st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=scalp", use_container_width=True)
 
             if scalp_shorts_all:
                 st.markdown("<div style='font-size:13px;font-weight:700;color:#d45d5d;margin:10px 0 4px;letter-spacing:0.5px;'>▼ SHORT Opportunities</div>", unsafe_allow_html=True)
@@ -2908,22 +3215,23 @@ if st.session_state["page"] == "home":
                     _sc_ts_color = "#5eb88a" if _sc_ts >= 60 else "#d4a054" if _sc_ts >= 40 else "#d45d5d"
                     _sc_fs_color = "#5eb88a" if _sc_fs >= 60 else "#d4a054" if _sc_fs >= 40 else "#d45d5d"
 
+                    _gap_v = pick.get("gap_today", "")
+                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _ai_v = pick.get("ai_trend", "")
+                    _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
+                                  else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
+                                  else '<span style="background:rgba(212,160,84,0.1);border:1px solid rgba(212,160,84,0.25);color:#d4a054;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI →</span>' if _ai_v == "NEUTRAL" else "")
+                    _tv_url = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}"
+                    _name_row = f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{pick["name"]}</span><a href="{_tv_url}" target="_blank" title="View on TradingView" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>{_inline_gap}{_inline_ai}</div>'
+
                     _sc_card_col, _sc_act_col = st.columns([8, 1], vertical_alignment="center")
                     with _sc_card_col:
                         st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(212,93,93,0.15); border-radius: 10px;
                             padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                             <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
-                                {_badge}
-                                <div>
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
-                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
-                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
-                                        <span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d;
-                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span>
-                                    </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
-                                </div>
+                                <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">{_badge}<span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span></div>
+                                <div>{_name_row}<div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div></div>
                             </div>
                             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                                 <div style="text-align: center;">
@@ -2961,30 +3269,7 @@ if st.session_state["page"] == "home":
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sc_act_col:
-                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
-                        if st.button("Paper Trade", key=f"scr_sc_short_pt_{i}", type="primary", use_container_width=True):
-                            try:
-                                _tid = place_trade(
-                                    ticker=pick["ticker"], trade_type="scalp",
-                                    direction=pick["signal"],
-                                    entry_price=pick["entry"],
-                                    stop_loss=pick["stop_loss"],
-                                    target_1=pick["target_1"],
-                                    target_2=pick["target_2"],
-                                    quantity=1,
-                                    signal_strength=pick["strength"],
-                                    confidence=pick["confidence"],
-                                    reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
-                                )
-                                st.success(f"Trade #{_tid} placed!")
-                            except ValueError as e:
-                                st.error(str(e))
-                        st.markdown(
-                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=scalp" target="_blank">'
-                            f'Analyze</a>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
+                        st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=scalp", use_container_width=True)
 
             # All Scalping Signals table
             st.markdown("---")
@@ -3099,6 +3384,27 @@ if st.session_state["page"] == "home":
                         except Exception:
                             _d_fund_data = {}
                         _d_fund = compute_fundamental_score(_d_fund_data)
+                        _d_ohlol = ""
+                        _d_breakout = False
+                        _d_gap = ""
+                        _d_ai = ""
+                        try:
+                            if len(t_df) >= 21:
+                                _tl = t_df.iloc[-1]
+                                _tol = 0.001
+                                if abs(_tl["High"] - _tl["Open"]) / max(_tl["Open"], 0.01) <= _tol:
+                                    _d_ohlol = "O=H"
+                                elif abs(_tl["Low"] - _tl["Open"]) / max(_tl["Open"], 0.01) <= _tol:
+                                    _d_ohlol = "O=L"
+                                _d_breakout = bool(_tl["Close"] > t_df["High"].iloc[-21:-1].max() and _tl["Volume"] > t_df["Volume"].iloc[-21:-1].mean() * 1.5)
+                                _g = (_tl["Open"] - t_df["Close"].iloc[-2]) / max(t_df["Close"].iloc[-2], 0.01)
+                                if _g > 0.005:
+                                    _d_gap = "gap_up"
+                                elif _g < -0.005:
+                                    _d_gap = "gap_down"
+                            _d_ai = _get_ai_trend(t)
+                        except Exception:
+                            pass
                         scan_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -3118,6 +3424,10 @@ if st.session_state["page"] == "home":
                             "patterns": t_patterns,
                             "tech_score": _d_tech,
                             "fund_score": _d_fund,
+                            "ohlol_today": _d_ohlol,
+                            "breakout": _d_breakout,
+                            "gap_today": _d_gap,
+                            "ai_trend": _d_ai,
                         })
                     except Exception:
                         pass
@@ -3164,7 +3474,7 @@ if st.session_state["page"] == "home":
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            st.markdown("#### Top Swing Picks")
+            st.markdown("#### Top 5 Swing Picks")
             if buys:
                 st.markdown('<div style="font-size: 14px; font-weight: 700; color: #5eb88a; margin-bottom: 8px;">▲ LONG Opportunities</div>', unsafe_allow_html=True)
                 for i, pick in enumerate(buys[:5]):
@@ -3198,22 +3508,23 @@ if st.session_state["page"] == "home":
                                 <div style="font-size: 12px; color: rgba(255,255,255,0.22);">charges ₹{_sw_ch['total_charges']:.2f}</div>
                             </div>"""
 
+                    _gap_v = pick.get("gap_today", "")
+                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _ai_v = pick.get("ai_trend", "")
+                    _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
+                                  else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
+                                  else '<span style="background:rgba(212,160,84,0.1);border:1px solid rgba(212,160,84,0.25);color:#d4a054;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI →</span>' if _ai_v == "NEUTRAL" else "")
+                    _tv_url = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}"
+                    _name_row = f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{pick["name"]}</span><a href="{_tv_url}" target="_blank" title="View on TradingView" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>{_inline_gap}{_inline_ai}</div>'
+
                     _sw_card_col, _sw_act_col = st.columns([8, 1], vertical_alignment="center")
                     with _sw_card_col:
                         st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px;
                             padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                             <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
-                                {_badge}
-                                <div>
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
-                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
-                                           style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>
-                                        <span style="background: {_sig_bg}; border: 1px solid {_sig_border}; color: {_sig_color};
-                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">{pick['signal']}</span>
-                                    </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
-                                </div>
+                                <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">{_badge}<span style="background: {_sig_bg}; border: 1px solid {_sig_border}; color: {_sig_color}; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: 0.04em;">{pick['signal']}</span></div>
+                                <div>{_name_row}<div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div></div>
                             </div>
                             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                                 <div style="text-align: center;">
@@ -3244,35 +3555,7 @@ if st.session_state["page"] == "home":
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sw_act_col:
-                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
-                        if st.button("Paper Trade", key=f"scr_sw_pt_{i}", type="primary", use_container_width=True):
-                            if p_setup:
-                                try:
-                                    _tid = place_trade(
-                                        ticker=pick["ticker"], trade_type="swing",
-                                        direction=pick["signal"],
-                                        entry_price=p_setup.entry_price,
-                                        stop_loss=p_setup.stop_loss,
-                                        target_1=p_setup.target_1,
-                                        target_2=p_setup.target_2,
-                                        target_3=p_setup.target_3,
-                                        quantity=1,
-                                        signal_strength=pick["strength"],
-                                        confidence=pick["confidence"],
-                                        reasons=", ".join(
-                                            pick["reasons"]) if pick["reasons"] else "",
-                                    )
-                                    st.success(f"Trade #{_tid} placed!")
-                                except ValueError as e:
-                                    st.error(str(e))
-                            else:
-                                st.warning("No trade setup available")
-                        st.markdown(
-                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
-                            f'Analyze</a>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
+                        st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=swing", use_container_width=True)
             else:
                 st.info("No BUY signals found.")
 
@@ -3302,24 +3585,23 @@ if st.session_state["page"] == "home":
                                 <div style="font-size: 12px; color: rgba(255,255,255,0.22);">charges ₹{_sw_ch['total_charges']:.2f}</div>
                             </div>"""
 
+                    _gap_v = pick.get("gap_today", "")
+                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _ai_v = pick.get("ai_trend", "")
+                    _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
+                                  else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
+                                  else '<span style="background:rgba(212,160,84,0.1);border:1px solid rgba(212,160,84,0.25);color:#d4a054;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI →</span>' if _ai_v == "NEUTRAL" else "")
+                    _tv_url = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}"
+                    _name_row = f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{pick["name"]}</span><a href="{_tv_url}" target="_blank" title="View on TradingView" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>{_inline_gap}{_inline_ai}</div>'
+
                     _sw_short_card_col, _sw_short_act_col = st.columns([8, 1], vertical_alignment="center")
                     with _sw_short_card_col:
                         st.markdown(f"""<div style="background: #16181e; border: 1px solid rgba(212,93,93,0.1); border-radius: 10px;
                             padding: 26px 18px; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                             <div style="display: flex; align-items: center; gap: 12px; min-width: 200px;">
-                                {_badge}
-                                <div>
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-size: 16px; font-weight: 700; color: #e8e4de;">{pick['name']}</span>
-                                        <a href="https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{pick['ticker'].replace('.NS','')}" target="_blank" title="View on TradingView"
-                                           style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
-                                                  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
-                                                  text-decoration: none; color: rgba(255,255,255,0.5); font-size: 11px;">↗</a>
-                                        <span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d;
-                                               font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span>
-                                    </div>
-                                    <div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div>
-                                </div>
+                                <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">{_badge}<span style="background: rgba(212,93,93,0.12); border: 1px solid rgba(212,93,93,0.25); color: #d45d5d; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: 0.04em;">SHORT</span></div>
+                                <div>{_name_row}<div style="font-size: 14px; color: rgba(255,255,255,0.45); font-family: 'JetBrains Mono', monospace;">LTP ₹{pick.get('ltp', pick['price']):,.2f}</div></div>
                             </div>
                             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                                 <div style="text-align: center;">
@@ -3350,34 +3632,7 @@ if st.session_state["page"] == "home":
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sw_short_act_col:
-                        st.markdown('<div class="scr-btn-col">', unsafe_allow_html=True)
-                        if st.button("Paper Trade", key=f"scr_sw_short_pt_{i}", type="primary", use_container_width=True):
-                            if p_setup:
-                                try:
-                                    _tid = place_trade(
-                                        ticker=pick["ticker"], trade_type="swing",
-                                        direction="SELL",
-                                        entry_price=p_setup.entry_price,
-                                        stop_loss=p_setup.stop_loss,
-                                        target_1=p_setup.target_1,
-                                        target_2=p_setup.target_2,
-                                        target_3=p_setup.target_3,
-                                        quantity=1,
-                                        signal_strength=pick["strength"],
-                                        confidence=pick["confidence"],
-                                        reasons=", ".join(pick["reasons"]) if pick["reasons"] else "",
-                                    )
-                                    st.success(f"Trade #{_tid} placed!")
-                                except ValueError as e:
-                                    st.error(str(e))
-                            else:
-                                st.warning("No trade setup available")
-                        st.markdown(
-                            f'<a class="scr-btn scr-btn-analyse" href="?stock={pick["ticker"]}&tab=swing" target="_blank">'
-                            f'Analyze</a>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
+                        st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=swing", use_container_width=True)
 
             # All Swing Signals table
             st.markdown("---")
@@ -4022,6 +4277,214 @@ if st.session_state["page"] == "home":
                             )
                             st.cache_data.clear()
                             st.rerun()
+
+
+# ============================================================
+# SEASONALITY TAB
+# ============================================================
+if st.session_state["page"] == "home":
+    with tab_seasonality:
+        st.markdown("""<div style="margin-bottom: 12px;">
+            <span style="font-size: 20px; font-weight: 700; color: #e8e4de;">Seasonality Patterns</span>
+            <div style="font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px;">Historical return patterns by month and day of week</div>
+        </div>""", unsafe_allow_html=True)
+
+        _sea_c1, _sea_c2 = st.columns([2, 1])
+        with _sea_c1:
+            _sea_ticker = st.text_input("Stock / Index", value="^NSEI", key="sea_ticker",
+                                        help="Use ^NSEI for Nifty 50, ^NSEBANK for Bank Nifty, or any NSE stock like RELIANCE.NS")
+        with _sea_c2:
+            _sea_years = st.selectbox("Years of history", [5, 8, 10], index=1, key="sea_years")
+
+        _sea_col1, _sea_col2 = st.columns(2)
+
+        with _sea_col1:
+            st.markdown("##### Monthly Return Heatmap")
+            with st.spinner("Loading monthly data..."):
+                _monthly_df = get_monthly_returns(_sea_ticker, years=_sea_years)
+            if not _monthly_df.empty:
+                _fig_heat = px.imshow(
+                    _monthly_df,
+                    color_continuous_scale=[[0, "#d45d5d"], [0.5, "#1e2130"], [1, "#5eb88a"]],
+                    zmin=-10, zmax=10,
+                    text_auto=".1f",
+                    aspect="auto",
+                    labels=dict(color="Return %"),
+                )
+                _fig_heat.update_layout(**CHART_LAYOUT, height=350, coloraxis_showscale=False)
+                _fig_heat.update_traces(textfont_size=10)
+                st.plotly_chart(_fig_heat, use_container_width=True)
+
+                _monthly_stats = get_monthly_stats(_sea_ticker, years=_sea_years)
+                if not _monthly_stats.empty:
+                    _best = _monthly_stats.loc[_monthly_stats["AvgReturn"].idxmax()]
+                    _worst = _monthly_stats.loc[_monthly_stats["AvgReturn"].idxmin()]
+                    st.markdown(f"""<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px;">
+                        <div style="flex:1;background:rgba(94,184,138,0.08);border:1px solid rgba(94,184,138,0.2);border-radius:8px;padding:10px 14px;">
+                            <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;">Best Month</div>
+                            <div style="font-size:16px;font-weight:700;color:#5eb88a;">{_best['MonthName']} +{_best['AvgReturn']:.1f}%</div>
+                            <div style="font-size:11px;color:rgba(255,255,255,0.3);">Positive {_best['PositiveRate']:.0f}% of years</div>
+                        </div>
+                        <div style="flex:1;background:rgba(212,93,93,0.08);border:1px solid rgba(212,93,93,0.2);border-radius:8px;padding:10px 14px;">
+                            <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;">Worst Month</div>
+                            <div style="font-size:16px;font-weight:700;color:#d45d5d;">{_worst['MonthName']} {_worst['AvgReturn']:.1f}%</div>
+                            <div style="font-size:11px;color:rgba(255,255,255,0.3);">Positive {_worst['PositiveRate']:.0f}% of years</div>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+            else:
+                st.warning("Could not load data for this ticker.")
+
+        with _sea_col2:
+            st.markdown("##### Day of Week Returns")
+            with st.spinner("Loading daily data..."):
+                _dow_df = get_dow_returns(_sea_ticker, years=min(_sea_years, 3))
+            if not _dow_df.empty:
+                _dow_colors = ["#5eb88a" if v >= 0 else "#d45d5d" for v in _dow_df["AvgReturn"]]
+                _fig_dow = go.Figure(go.Bar(
+                    x=_dow_df["Day"],
+                    y=_dow_df["AvgReturn"],
+                    marker_color=_dow_colors,
+                    text=[f"{v:+.2f}%" for v in _dow_df["AvgReturn"]],
+                    textposition="outside",
+                ))
+                _fig_dow.update_layout(**CHART_LAYOUT, height=280,
+                                       yaxis_title="Avg Return %",
+                                       showlegend=False)
+                st.plotly_chart(_fig_dow, use_container_width=True)
+
+                _best_dow = _dow_df.loc[_dow_df["AvgReturn"].idxmax()]
+                _worst_dow = _dow_df.loc[_dow_df["AvgReturn"].idxmin()]
+                st.markdown(f"""<div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:4px;">
+                    Best day: <b style="color:#5eb88a;">{_best_dow['Day']} ({_best_dow['AvgReturn']:+.2f}%)</b> &nbsp;|&nbsp;
+                    Worst: <b style="color:#d45d5d;">{_worst_dow['Day']} ({_worst_dow['AvgReturn']:+.2f}%)</b>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.warning("Could not load data for this ticker.")
+
+
+# ============================================================
+# OPEN INTEREST TAB
+# ============================================================
+if st.session_state["page"] == "home":
+    with tab_oi:
+        st.markdown("""<div style="margin-bottom: 12px;">
+            <span style="font-size: 20px; font-weight: 700; color: #e8e4de;">Open Interest Analysis</span>
+            <div style="font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px;">Options positioning, PCR and position status from NSE live data</div>
+        </div>""", unsafe_allow_html=True)
+
+        _oi_c1, _oi_c2 = st.columns([2, 1])
+        with _oi_c1:
+            _oi_symbol = st.selectbox("Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY"] +
+                                      [t.replace(".NS", "") for t in list(POPULAR_INDIAN_STOCKS.keys())[:15]],
+                                      key="oi_symbol")
+        with _oi_c2:
+            st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
+            _oi_refresh = st.button("🔄 Refresh", use_container_width=True, key="oi_refresh_btn")
+
+        if _oi_refresh:
+            st.cache_data.clear()
+
+        with st.spinner("Fetching option chain from NSE..."):
+            _oi_symbol_nse = _oi_symbol if _oi_symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY") else _oi_symbol + ".NS"
+            _oi_chain = fetch_nse_option_chain(_oi_symbol)
+
+        if not _oi_chain:
+            st.error("Could not fetch option chain from NSE. NSE may be closed or the request was blocked. Try again.")
+        else:
+            _pcr = calculate_pcr(_oi_chain)
+            _oi_totals = get_total_oi(_oi_chain)
+            _oi_sent = get_oi_sentiment(_pcr)
+
+            # Fetch price change for OI status
+            try:
+                _oi_price_ticker = "^NSEI" if _oi_symbol == "NIFTY" else ("^NSEBANK" if _oi_symbol == "BANKNIFTY" else _oi_symbol + ".NS")
+                _oi_price_df = fetch_stock_data(_oi_price_ticker, period_years=1)
+                _price_chng_pct = float(_oi_price_df["Close"].pct_change().iloc[-1] * 100) if _oi_price_df is not None and len(_oi_price_df) >= 2 else 0.0
+            except Exception:
+                _price_chng_pct = 0.0
+
+            _oi_chng_pct = (_oi_totals["oi_chng"] / max(_oi_totals["total_oi"] - _oi_totals["oi_chng"], 1)) * 100
+            _oi_status = get_oi_status(_price_chng_pct, _oi_chng_pct)
+            _oi_status_col = get_oi_status_color(_oi_status)
+
+            # PCR + OI Status cards
+            _oi_card1, _oi_card2, _oi_card3, _oi_card4 = st.columns(4)
+            _sent_color = "#5eb88a" if _oi_sent == "Bullish" else "#d45d5d" if _oi_sent == "Bearish" else "#d4a054"
+            with _oi_card1:
+                st.markdown(f"""<div style="background:#16181e;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;">PCR</div>
+                    <div style="font-size:28px;font-weight:800;color:{_sent_color};">{_pcr:.2f}</div>
+                    <div style="font-size:12px;color:{_sent_color};font-weight:600;">{_oi_sent}</div>
+                </div>""", unsafe_allow_html=True)
+            with _oi_card2:
+                st.markdown(f"""<div style="background:#16181e;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;">Position Status</div>
+                    <div style="font-size:16px;font-weight:800;color:{_oi_status_col};margin-top:4px;">{_oi_status}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.3);margin-top:2px;">Price {_price_chng_pct:+.2f}% | OI {_oi_chng_pct:+.1f}%</div>
+                </div>""", unsafe_allow_html=True)
+            with _oi_card3:
+                st.markdown(f"""<div style="background:#16181e;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;">CE Open Interest</div>
+                    <div style="font-size:20px;font-weight:800;color:#d45d5d;">{_oi_totals['ce_oi']:,}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.3);">Chng {_oi_totals['ce_chng']:+,}</div>
+                </div>""", unsafe_allow_html=True)
+            with _oi_card4:
+                st.markdown(f"""<div style="background:#16181e;border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:16px;text-align:center;">
+                    <div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.5px;">PE Open Interest</div>
+                    <div style="font-size:20px;font-weight:800;color:#5eb88a;">{_oi_totals['pe_oi']:,}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.3);">Chng {_oi_totals['pe_chng']:+,}</div>
+                </div>""", unsafe_allow_html=True)
+
+            st.markdown('<div style="height:16px;"></div>', unsafe_allow_html=True)
+
+            # Price vs Total OI chart
+            _oi_chart_col1, _oi_chart_col2 = st.columns([3, 2])
+            with _oi_chart_col1:
+                st.markdown("##### Price vs Total Open Interest")
+                try:
+                    _oi_price_ticker2 = "^NSEI" if _oi_symbol == "NIFTY" else ("^NSEBANK" if _oi_symbol == "BANKNIFTY" else _oi_symbol + ".NS")
+                    _price_hist = fetch_stock_data(_oi_price_ticker2, period_years=1).tail(60)
+                    _fig_pvoi = make_subplots(specs=[[{"secondary_y": True}]])
+                    _fig_pvoi.add_trace(
+                        go.Scatter(x=_price_hist.index, y=_price_hist["Close"],
+                                   name="Price", line=dict(color=C_AMBER, width=2)),
+                        secondary_y=False,
+                    )
+                    _oi_series = _price_hist["Volume"]
+                    _fig_pvoi.add_trace(
+                        go.Bar(x=_price_hist.index, y=_oi_series,
+                               name="Volume (OI proxy)", marker_color="rgba(155,142,196,0.3)"),
+                        secondary_y=True,
+                    )
+                    _fig_pvoi.update_layout(**CHART_LAYOUT, height=300, showlegend=True,
+                                            legend=dict(orientation="h", y=1.1))
+                    _fig_pvoi.update_yaxes(title_text="Price", secondary_y=False)
+                    _fig_pvoi.update_yaxes(title_text="Volume", secondary_y=True, showgrid=False)
+                    st.plotly_chart(_fig_pvoi, use_container_width=True)
+                except Exception:
+                    st.info("Price chart unavailable for this symbol.")
+
+            with _oi_chart_col2:
+                st.markdown("##### Top Strike Prices")
+                _strikes = get_top_strikes(_oi_chain, top_n=5)
+                if _strikes["top_ce"] or _strikes["top_pe"]:
+                    _str_c1, _str_c2 = st.columns(2)
+                    with _str_c1:
+                        st.markdown('<div style="font-size:12px;font-weight:700;color:#d45d5d;margin-bottom:4px;">Top CE OI</div>', unsafe_allow_html=True)
+                        for s in _strikes["top_ce"]:
+                            st.markdown(f'<div style="font-size:12px;color:rgba(255,255,255,0.7);padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);">₹{s["strike"]:,} <span style="color:#d45d5d;float:right;">{s["ce_oi"]:,}</span></div>', unsafe_allow_html=True)
+                    with _str_c2:
+                        st.markdown('<div style="font-size:12px;font-weight:700;color:#5eb88a;margin-bottom:4px;">Top PE OI</div>', unsafe_allow_html=True)
+                        for s in _strikes["top_pe"]:
+                            st.markdown(f'<div style="font-size:12px;color:rgba(255,255,255,0.7);padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);">₹{s["strike"]:,} <span style="color:#5eb88a;float:right;">{s["pe_oi"]:,}</span></div>', unsafe_allow_html=True)
+
+            # PCR interpretation guide
+            st.markdown("""<div style="margin-top:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px;font-size:12px;color:rgba(255,255,255,0.4);line-height:1.8;">
+                <b style="color:rgba(255,255,255,0.6);">PCR Guide:</b> &nbsp;
+                <span style="color:#5eb88a;">PCR &gt; 1.2</span> = Bullish (more PE writers = market expects support) &nbsp;|&nbsp;
+                <span style="color:#d45d5d;">PCR &lt; 0.8</span> = Bearish (more CE writers = market expects resistance) &nbsp;|&nbsp;
+                <span style="color:#d4a054;">0.8–1.2</span> = Neutral
+            </div>""", unsafe_allow_html=True)
 
 
 # ============================================================
