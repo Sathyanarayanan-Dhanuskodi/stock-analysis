@@ -101,7 +101,11 @@ def xgb_recursive_forecast(
     forecast_days: int = 30,
 ) -> list[float]:
     """Multi-step forecast using recursive strategy."""
-    available_cols = [c for c in feature_cols if c in df.columns]
+    model_features = getattr(model, "feature_names_in_", None)
+    if model_features is not None:
+        available_cols = [c for c in model_features if c in df.columns]
+    else:
+        available_cols = [c for c in feature_cols if c in df.columns]
     working_df = df.copy()
     predictions = []
 

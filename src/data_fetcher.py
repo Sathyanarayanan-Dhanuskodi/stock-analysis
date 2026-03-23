@@ -75,8 +75,8 @@ SECTOR_STOCKS = {
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
     """Fetch historical OHLCV data for a given stock ticker."""
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=period_years * 365)
+    end_date = datetime.now() + timedelta(days=1)
+    start_date = end_date - timedelta(days=period_years * 365 + 1)
 
     stock = yf.Ticker(ticker)
     df = _yf_retry(lambda: stock.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d")))
@@ -95,8 +95,8 @@ def fetch_stock_data(ticker: str, period_years: int = 5) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_market_context(period_years: int = 5) -> pd.DataFrame:
     """Fetch Nifty 50 and India VIX data for market context features."""
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=period_years * 365)
+    end_date = datetime.now() + timedelta(days=1)
+    start_date = end_date - timedelta(days=period_years * 365 + 1)
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
@@ -134,8 +134,8 @@ def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.Da
     """Fetch Close prices for multiple tickers, aligned on common dates."""
     if isinstance(tickers, list):
         tickers = tuple(tickers)
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=period_years * 365)
+    end_date = datetime.now() + timedelta(days=1)
+    start_date = end_date - timedelta(days=period_years * 365 + 1)
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
@@ -158,7 +158,7 @@ def fetch_multiple_stocks(tickers: tuple | list, period_years: int = 2) -> pd.Da
     return prices
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_stock_info(ticker: str) -> dict:
     """Get basic stock information."""
     stock = yf.Ticker(ticker)
@@ -166,12 +166,16 @@ def get_stock_info(ticker: str) -> dict:
         info = _yf_retry(lambda: stock.info) or {}
     except Exception:
         info = {}
+    price = (info.get("currentPrice")
+             or info.get("regularMarketPrice")
+             or info.get("previousClose")
+             or 0)
     return {
         "name": info.get("longName", ticker.replace(".NS", "")),
         "sector": info.get("sector", "N/A"),
         "industry": info.get("industry", "N/A"),
         "market_cap": info.get("marketCap", 0),
-        "current_price": info.get("currentPrice", info.get("regularMarketPrice", 0)),
+        "current_price": price,
         "currency": info.get("currency", "INR"),
         # Real-time intraday fields
         "prev_close": info.get("regularMarketPreviousClose", 0),

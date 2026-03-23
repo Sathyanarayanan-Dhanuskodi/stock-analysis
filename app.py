@@ -819,7 +819,7 @@ if st.session_state["page"] == "analysis":
     today_open = info.get("open_price") or raw_df["Open"].iloc[-1]
     today_high = info.get("day_high") or raw_df["High"].iloc[-1]
     today_low = info.get("day_low") or raw_df["Low"].iloc[-1]
-    today_close = prev_close  # "C" badge = previous close for reference
+    today_close = cur_price  # "C" badge = current/last price (today's close)
     today_range = today_high - today_low if today_high > today_low else 1
     today_open_pct = ((today_open - today_low) / today_range) * 100
     today_close_pct = ((today_close - today_low) / today_range) * 100
@@ -943,9 +943,9 @@ if st.session_state["page"] == "analysis":
         """Render stock banner + indicators row inside any tab."""
         _hq = '<span title="{t}" style="cursor:help;background:{bg};border:1px solid {br};color:{c};font-size:11px;font-weight:700;padding:2px 8px;border-radius:5px;">{lbl}</span>'
         if _hdr_gap_today == "gap_up":
-            _hdr_gap_badge = _hq.format(t="Gap Up: Today opened higher than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(212,93,93,0.1)", br="rgba(212,93,93,0.25)", c="#f87171", lbl="Gap Up ↑")
+            _hdr_gap_badge = _hq.format(t="Gap Up: Today opened higher than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(94,184,138,0.1)", br="rgba(94,184,138,0.25)", c="#34d399", lbl="Gap Up ↑")
         elif _hdr_gap_today == "gap_down":
-            _hdr_gap_badge = _hq.format(t="Gap Down: Today opened lower than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(94,184,138,0.1)", br="rgba(94,184,138,0.25)", c="#34d399", lbl="Gap Down ↓")
+            _hdr_gap_badge = _hq.format(t="Gap Down: Today opened lower than yesterday's close. These gaps often fill (price returns to yesterday's close) during the day.", bg="rgba(212,93,93,0.1)", br="rgba(212,93,93,0.25)", c="#f87171", lbl="Gap Down ↓")
         else:
             _hdr_gap_badge = ""
         if _hdr_ai_trend == "UP":
@@ -1050,9 +1050,9 @@ if st.session_state["page"] == "analysis":
         _qs_day_card = ""
         _tip = '<span title="{t}" style="cursor:help;color:rgba(255,255,255,0.28);font-size:8px;border:1px solid rgba(255,255,255,0.15);border-radius:50%;padding:0 3px;margin-left:3px;line-height:1.4;">?</span>'
         if _hdr_gap_today == "gap_up":
-            _gap_lbl, _gap_val, _gap_c = "Gap Up ↑", f"+{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#f87171"
+            _gap_lbl, _gap_val, _gap_c = "Gap Up ↑", f"+{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#34d399"
         elif _hdr_gap_today == "gap_down":
-            _gap_lbl, _gap_val, _gap_c = "Gap Down ↓", f"-{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#34d399"
+            _gap_lbl, _gap_val, _gap_c = "Gap Down ↓", f"-{abs((raw_df['Open'].iloc[-1]-raw_df['Close'].iloc[-2])/raw_df['Close'].iloc[-2]*100):.2f}%", "#f87171"
         else:
             _gap_lbl, _gap_val, _gap_c = "No Gap", "—", "rgba(255,255,255,0.3)"
         _gap_tip = _tip.format(t="Gap = difference between today's Open and yesterday's Close. A Gap Up means the stock jumped up at open. Gap Up often reverses (fills back) during the day.")
@@ -1199,11 +1199,11 @@ def _build_pattern_badges(pick: dict) -> str:
     try:
         _gstats = get_gap_fill_stats(pick["ticker"])
         if gap == "gap_up" and _gstats["gap_up_count"] >= 5:
-            _gc = "#d45d5d" if _gstats["gap_up_fill_rate"] >= 60 else "#d4a054"
-            badges.append(f'<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Up — fills {_gstats["gap_up_fill_rate"]:.0f}%</span>')
+            _gc = "#5eb88a" if _gstats["gap_up_fill_rate"] < 60 else "#d4a054"
+            badges.append(f'<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Up — fills {_gstats["gap_up_fill_rate"]:.0f}%</span>')
         elif gap == "gap_down" and _gstats["gap_down_count"] >= 5:
-            _gc = "#5eb88a" if _gstats["gap_down_fill_rate"] >= 60 else "#d4a054"
-            badges.append(f'<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Down — fills {_gstats["gap_down_fill_rate"]:.0f}%</span>')
+            _gc = "#d45d5d" if _gstats["gap_down_fill_rate"] < 60 else "#d4a054"
+            badges.append(f'<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:{_gc};font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;">Gap Down — fills {_gstats["gap_down_fill_rate"]:.0f}%</span>')
     except Exception:
         pass
     ai_trend = pick.get("ai_trend", "")
@@ -3762,8 +3762,8 @@ if st.session_state["page"] == "home":
                     _sc_fs_color = "#5eb88a" if _sc_fs >= 60 else "#d4a054" if _sc_fs >= 40 else "#d45d5d"
 
                     _gap_v = pick.get("gap_today", "")
-                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
-                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _inline_gap = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
                     _ai_v = pick.get("ai_trend", "")
                     _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
@@ -3834,8 +3834,8 @@ if st.session_state["page"] == "home":
                     _sc_fs_color = "#5eb88a" if _sc_fs >= 60 else "#d4a054" if _sc_fs >= 40 else "#d45d5d"
 
                     _gap_v = pick.get("gap_today", "")
-                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
-                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _inline_gap = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
                     _ai_v = pick.get("ai_trend", "")
                     _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
@@ -4396,8 +4396,8 @@ if st.session_state["page"] == "home":
                             </div>"""
 
                     _gap_v = pick.get("gap_today", "")
-                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
-                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _inline_gap = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
                     _ai_v = pick.get("ai_trend", "")
                     _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
@@ -4473,8 +4473,8 @@ if st.session_state["page"] == "home":
                             </div>"""
 
                     _gap_v = pick.get("gap_today", "")
-                    _inline_gap = ('<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
-                                   else '<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
+                    _inline_gap = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Up</span>' if _gap_v == "gap_up"
+                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Gap Down</span>' if _gap_v == "gap_down" else "")
                     _ai_v = pick.get("ai_trend", "")
                     _inline_ai = ('<span style="background:rgba(94,184,138,0.1);border:1px solid rgba(94,184,138,0.25);color:#34d399;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↑</span>' if _ai_v == "UP"
                                   else '<span style="background:rgba(212,93,93,0.1);border:1px solid rgba(212,93,93,0.25);color:#f87171;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">AI ↓</span>' if _ai_v == "DOWN"
