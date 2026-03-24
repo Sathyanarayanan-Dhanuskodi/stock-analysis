@@ -1248,7 +1248,7 @@ def _render_index_bar():
                 <div style="font-size:10px;color:rgba(255,255,255,0.35);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">{_idx_name}</div>
                 <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
                     <span style="font-size:15px;font-weight:700;color:#e8e4de;font-family:'JetBrains Mono',monospace;">{_snap["price"]:,.1f}</span>
-                    <span style="font-size:11px;font-weight:600;color:{_ic};font-family:'JetBrains Mono',monospace;">{_ia} {_snap["pct"]:+.2f}%</span>
+                    <span style="font-size:11px;font-weight:600;color:{_ic};font-family:'JetBrains Mono',monospace;">{_ia} {_snap["chg"]:+,.1f} ({_snap["pct"]:+.2f}%)</span>
                 </div>
             </div>'''
     if _idx_cards_html:
@@ -2132,8 +2132,26 @@ if st.session_state["page"] == "analysis":
 
         signal = generate_swing_signals(df)
         atr_data = calculate_atr_stop_loss(df)
+        _sw_ai_preds = None
+        try:
+            _sw_ai_result = predict_with_saved_model(ticker, forecast_days=7)
+            if _sw_ai_result:
+                _sw_ai_preds = _sw_ai_result["predictions"]
+        except Exception:
+            pass
+        _sw_season_avg = None
+        try:
+            _sw_mstats = get_monthly_stats(ticker)
+            if not _sw_mstats.empty:
+                _cur_month = pd.Timestamp.now().month
+                _row = _sw_mstats[_sw_mstats["MonthName"] == ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][_cur_month - 1]]
+                if not _row.empty:
+                    _sw_season_avg = float(_row.iloc[0]["AvgReturn"])
+        except Exception:
+            pass
         setup = calculate_trade_setup(
-            df, signal, capital=capital, max_risk_pct=max_risk_pct / 100)
+            df, signal, capital=capital, max_risk_pct=max_risk_pct / 100,
+            ai_predictions=_sw_ai_preds, seasonality_avg=_sw_season_avg)
         sr_data = calculate_support_resistance(df, lookback=sr_lookback)
         fib_data = calculate_fibonacci_retracements(df, lookback=sr_lookback)
         pivot_data = calculate_pivot_points(df, method=pivot_method)
@@ -2249,8 +2267,9 @@ if st.session_state["page"] == "analysis":
 
         with sw_sig_right:
             # Quantity input first so charges reflect user selection
+            _auto_qty = max(1, int(capital // setup.entry_price)) if setup.entry_price > 0 else 1
             swing_qty = st.number_input(
-                "Quantity", min_value=1, value=10, step=5, key="swing_qty_trade")
+                "Quantity", min_value=1, value=_auto_qty, step=1, key="swing_qty_trade")
             _sw_capital_needed = setup.entry_price * swing_qty
 
             if signal.signal == "SELL":
@@ -3257,9 +3276,21 @@ if st.session_state["page"] == "home":
                     _outcome_border = "rgba(245,158,11,0.25)"
                     _outcome_label = "EXPIRED"
                 else:
-                    _outcome_color = "#d4a054"
-                    _outcome_bg = "rgba(212,160,84,0.06)"
-                    _outcome_border = "rgba(212,160,84,0.2)"
+                    _gross_pnl = row.get("pnl", 0) or 0
+                    _charges_val = row.get("charges", 0) or 0
+                    _closed_pnl = round(_gross_pnl - _charges_val, 2)
+                    if _closed_pnl > 0:
+                        _outcome_color = "#5eb88a"
+                        _outcome_bg = "rgba(5,150,105,0.06)"
+                        _outcome_border = "rgba(5,150,105,0.25)"
+                    elif _closed_pnl < 0:
+                        _outcome_color = "#d45d5d"
+                        _outcome_bg = "rgba(220,38,38,0.06)"
+                        _outcome_border = "rgba(220,38,38,0.25)"
+                    else:
+                        _outcome_color = "#d4a054"
+                        _outcome_bg = "rgba(212,160,84,0.06)"
+                        _outcome_border = "rgba(212,160,84,0.2)"
                     _outcome_label = "CLOSED"
 
                 _gross_pnl = row.get("pnl", 0) or 0
@@ -3590,7 +3621,7 @@ if st.session_state["page"] == "home":
         with _sc_scr_c1:
             scalp_scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
                                              key="scalp_scan_scope",
-                                             help="Scan all 25 popular stocks or pick a sector")
+                                             help="Scan all Nifty 50 stocks or pick a sector")
         with _sc_scr_c2:
             st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
             scalp_scan_btn = st.button("🔍 Scan Scalping", type="primary",
@@ -3657,6 +3688,21 @@ if st.session_state["page"] == "home":
                             _ai_trend = _get_ai_trend(t)
                         except Exception:
                             pass
+                        _sc_intra_chg = 0.0
+                        _sc_vol_surge = 1.0
+                        try:
+                            _sc_today = intra_df.index.normalize().max()
+                            _sc_today_bars = intra_df[intra_df.index.normalize() == _sc_today]
+                            if not _sc_today_bars.empty:
+                                _sc_day_open = _sc_today_bars.iloc[0]["Open"]
+                                _sc_day_cur = _sc_today_bars["Close"].iloc[-1]
+                                _sc_intra_chg = ((_sc_day_cur - _sc_day_open) / max(_sc_day_open, 0.01)) * 100
+                            if hasattr(intra_df.iloc[-1], "Vol_Ratio") and "Vol_Ratio" in intra_df.columns:
+                                _sc_vol_surge = float(intra_df["Vol_Ratio"].iloc[-1])
+                        except Exception:
+                            pass
+                        _sc_is_momentum = abs(_sc_intra_chg) >= 2 or (_breakout and _sc_vol_surge >= 2)
+                        _sc_momentum_type = "bullish" if _sc_intra_chg >= 2 or (_breakout and _sc_vol_surge >= 2) else ("bearish" if _sc_intra_chg <= -2 else "")
                         scalp_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -3681,6 +3727,10 @@ if st.session_state["page"] == "home":
                             "breakout": _breakout,
                             "gap_today": _gap_today,
                             "ai_trend": _ai_trend,
+                            "intraday_chg_pct": _sc_intra_chg,
+                            "vol_surge": _sc_vol_surge,
+                            "is_momentum": _sc_is_momentum,
+                            "momentum_type": _sc_momentum_type,
                         })
                     except Exception:
                         pass
@@ -3889,6 +3939,46 @@ if st.session_state["page"] == "home":
                     with _sc_act_col:
                         st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=scalp", use_container_width=True)
 
+            # Momentum / Breakout section
+            _sc_mom_bull = sorted([r for r in scalp_res if r.get("is_momentum") and r.get("momentum_type") == "bullish"], key=lambda x: x["intraday_chg_pct"], reverse=True)
+            _sc_mom_bear = sorted([r for r in scalp_res if r.get("is_momentum") and r.get("momentum_type") == "bearish"], key=lambda x: x["intraday_chg_pct"])
+            if _sc_mom_bull or _sc_mom_bear:
+                st.markdown("---")
+                st.markdown("#### Momentum / Breakout")
+                for _mom_list, _mom_label, _mom_color, _mom_arrow, _tab_key in [
+                    (_sc_mom_bull, "Bullish Momentum", "#5eb88a", "▲", "scalp"),
+                    (_sc_mom_bear, "Bearish Momentum", "#d45d5d", "▼", "scalp"),
+                ]:
+                    if _mom_list:
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:{_mom_color};margin:6px 0 4px;letter-spacing:0.5px;'>{_mom_arrow} {_mom_label}</div>", unsafe_allow_html=True)
+                        for _m in _mom_list:
+                            _m_chg = _m["intraday_chg_pct"]
+                            _m_chg_color = "#5eb88a" if _m_chg >= 0 else "#d45d5d"
+                            _m_chg_sign = "+" if _m_chg >= 0 else ""
+                            _m_vol = _m.get("vol_surge", 1)
+                            _m_vol_color = "#5eb88a" if _m_vol >= 2 else "#d4a054" if _m_vol >= 1.5 else "rgba(255,255,255,0.45)"
+                            _m_sig = _m["signal"]
+                            _m_sig_color = "#5eb88a" if _m_sig == "LONG" else "#d45d5d" if _m_sig == "SHORT" else "#d4a054"
+                            _m_brk = '<span style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#a855f7;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Breakout</span>' if _m.get("breakout") else ""
+                            _m_tv = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{_m['ticker'].replace('.NS','')}"
+                            _m_card, _m_act = st.columns([8, 1], vertical_alignment="center")
+                            with _m_card:
+                                _m_html = f'<div style="background:#16181e;border:1px solid rgba(168,85,247,0.15);border-radius:10px;padding:14px 18px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:12px;min-width:200px;"><div>'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{_m["name"]}</span>'
+                                _m_html += f'<a href="{_m_tv}" target="_blank" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>'
+                                _m_html += f'{_m_brk}</div>'
+                                _m_html += f'<div style="font-size:14px;color:rgba(255,255,255,0.45);font-family:\'JetBrains Mono\',monospace;">₹{_m["price"]:,.2f}</div>'
+                                _m_html += '</div></div>'
+                                _m_html += '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Change</div><div style="font-size:16px;font-weight:700;color:{_m_chg_color};font-family:\'JetBrains Mono\',monospace;">{_m_chg_sign}{_m_chg:.2f}%</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Volume</div><div style="font-size:14px;font-weight:700;color:{_m_vol_color};font-family:\'JetBrains Mono\',monospace;">{_m_vol:.1f}x</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Signal</div><div style="font-size:13px;font-weight:700;color:{_m_sig_color};">{_m_sig}</div></div>'
+                                _m_html += '</div></div>'
+                                st.markdown(_m_html, unsafe_allow_html=True)
+                            with _m_act:
+                                st.link_button("Analyze", url=f"?stock={_m['ticker']}&tab={_tab_key}", use_container_width=True)
+
             # All Scalping Signals table
             st.markdown("---")
             st.markdown("#### All Scalping Signals")
@@ -3931,7 +4021,7 @@ if st.session_state["page"] == "home":
         with _dt_scr_c1:
             dt_scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
                                          key="dt_scan_scope",
-                                         help="Scan all 25 popular stocks or pick a sector")
+                                         help="Scan all Nifty 50 stocks or pick a sector")
         with _dt_scr_c2:
             st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
             dt_scan_btn = st.button("🔍 Scan Day Trading", type="primary",
@@ -3962,6 +4052,27 @@ if st.session_state["page"] == "home":
                             _dt_fund_score = compute_fundamental_score(_dt_fund_data)
                         except Exception:
                             pass
+                        _dt_intra_chg = 0.0
+                        _dt_vol_surge = 1.0
+                        _dt_breakout = False
+                        try:
+                            _dt_today = intra_df.index.normalize().max()
+                            _dt_today_bars = intra_df[intra_df.index.normalize() == _dt_today]
+                            if not _dt_today_bars.empty:
+                                _dt_day_open = _dt_today_bars.iloc[0]["Open"]
+                                _dt_day_cur = _dt_today_bars["Close"].iloc[-1]
+                                _dt_intra_chg = ((_dt_day_cur - _dt_day_open) / max(_dt_day_open, 0.01)) * 100
+                            if "Vol_Ratio" in intra_df.columns:
+                                _dt_vol_surge = float(intra_df["Vol_Ratio"].iloc[-1])
+                            _dt_daily = fetch_stock_data(t, period_years=1)
+                            if _dt_daily is not None and len(_dt_daily) >= 21:
+                                _dt_20d_high = _dt_daily["High"].iloc[-21:-1].max()
+                                _dt_vol_avg = _dt_daily["Volume"].iloc[-21:-1].mean()
+                                _dt_breakout = bool(_dt_daily["Close"].iloc[-1] > _dt_20d_high and _dt_daily["Volume"].iloc[-1] > _dt_vol_avg * 1.5)
+                        except Exception:
+                            pass
+                        _dt_is_momentum = abs(_dt_intra_chg) >= 2 or (_dt_breakout and _dt_vol_surge >= 2)
+                        _dt_momentum_type = "bullish" if _dt_intra_chg >= 2 or (_dt_breakout and _dt_vol_surge >= 2) else ("bearish" if _dt_intra_chg <= -2 else "")
                         dt_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -3984,6 +4095,11 @@ if st.session_state["page"] == "home":
                             "orb_status": d_orb["breakout_status"],
                             "dt_score": int(min(100, d_micro["tradability_score"] * 0.6 + d_signal.confidence * 40)),
                             "fund_score": _dt_fund_score,
+                            "intraday_chg_pct": _dt_intra_chg,
+                            "vol_surge": _dt_vol_surge,
+                            "is_momentum": _dt_is_momentum,
+                            "momentum_type": _dt_momentum_type,
+                            "breakout": _dt_breakout,
                         })
                     except Exception:
                         pass
@@ -4157,6 +4273,46 @@ if st.session_state["page"] == "home":
                     with _dt_act_col:
                         st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=day_trade", use_container_width=True)
 
+            # Momentum / Breakout section
+            _dt_mom_bull = sorted([r for r in dt_res if r.get("is_momentum") and r.get("momentum_type") == "bullish"], key=lambda x: x["intraday_chg_pct"], reverse=True)
+            _dt_mom_bear = sorted([r for r in dt_res if r.get("is_momentum") and r.get("momentum_type") == "bearish"], key=lambda x: x["intraday_chg_pct"])
+            if _dt_mom_bull or _dt_mom_bear:
+                st.markdown("---")
+                st.markdown("#### Momentum / Breakout")
+                for _mom_list, _mom_label, _mom_color, _mom_arrow, _tab_key in [
+                    (_dt_mom_bull, "Bullish Momentum", "#5eb88a", "▲", "day_trade"),
+                    (_dt_mom_bear, "Bearish Momentum", "#d45d5d", "▼", "day_trade"),
+                ]:
+                    if _mom_list:
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:{_mom_color};margin:6px 0 4px;letter-spacing:0.5px;'>{_mom_arrow} {_mom_label}</div>", unsafe_allow_html=True)
+                        for _m in _mom_list:
+                            _m_chg = _m["intraday_chg_pct"]
+                            _m_chg_color = "#5eb88a" if _m_chg >= 0 else "#d45d5d"
+                            _m_chg_sign = "+" if _m_chg >= 0 else ""
+                            _m_vol = _m.get("vol_surge", 1)
+                            _m_vol_color = "#5eb88a" if _m_vol >= 2 else "#d4a054" if _m_vol >= 1.5 else "rgba(255,255,255,0.45)"
+                            _m_sig = _m["signal"]
+                            _m_sig_color = "#5eb88a" if _m_sig == "LONG" else "#d45d5d" if _m_sig == "SHORT" else "#d4a054"
+                            _m_brk = '<span style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#a855f7;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Breakout</span>' if _m.get("breakout") else ""
+                            _m_tv = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{_m['ticker'].replace('.NS','')}"
+                            _m_card, _m_act = st.columns([8, 1], vertical_alignment="center")
+                            with _m_card:
+                                _m_html = f'<div style="background:#16181e;border:1px solid rgba(168,85,247,0.15);border-radius:10px;padding:14px 18px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:12px;min-width:200px;"><div>'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{_m["name"]}</span>'
+                                _m_html += f'<a href="{_m_tv}" target="_blank" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>'
+                                _m_html += f'{_m_brk}</div>'
+                                _m_html += f'<div style="font-size:14px;color:rgba(255,255,255,0.45);font-family:\'JetBrains Mono\',monospace;">₹{_m["price"]:,.2f}</div>'
+                                _m_html += '</div></div>'
+                                _m_html += '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Change</div><div style="font-size:16px;font-weight:700;color:{_m_chg_color};font-family:\'JetBrains Mono\',monospace;">{_m_chg_sign}{_m_chg:.2f}%</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Volume</div><div style="font-size:14px;font-weight:700;color:{_m_vol_color};font-family:\'JetBrains Mono\',monospace;">{_m_vol:.1f}x</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Signal</div><div style="font-size:13px;font-weight:700;color:{_m_sig_color};">{_m_sig}</div></div>'
+                                _m_html += '</div></div>'
+                                st.markdown(_m_html, unsafe_allow_html=True)
+                            with _m_act:
+                                st.link_button("Analyze", url=f"?stock={_m['ticker']}&tab={_tab_key}", use_container_width=True)
+
             # Data table
             with st.expander("Full Scan Results"):
                 dt_table = []
@@ -4200,7 +4356,7 @@ if st.session_state["page"] == "home":
         with _sw_scr_c1:
             swing_scan_scope = st.selectbox("Scan scope", ["All Popular Stocks"] + list(SECTOR_STOCKS.keys()),
                                              key="swing_scan_scope",
-                                             help="Scan all 25 popular stocks or pick a sector")
+                                             help="Scan all Nifty 50 stocks or pick a sector")
         with _sw_scr_c2:
             st.markdown('<div style="height: 24px;"></div>', unsafe_allow_html=True)
             swing_scan_btn = st.button("🔍 Scan Swing", type="primary",
@@ -4223,15 +4379,46 @@ if st.session_state["page"] == "home":
                         t_df = add_technical_indicators(t_df)
                         t_signal = generate_swing_signals(t_df)
                         t_latest = t_df.iloc[-1]
-                        t_setup = calculate_trade_setup(t_df, t_signal)
+                        _t_ai_preds = None
+                        try:
+                            _t_ai_res = predict_with_saved_model(t, forecast_days=7)
+                            if _t_ai_res:
+                                _t_ai_preds = _t_ai_res["predictions"]
+                        except Exception:
+                            pass
+                        _t_season = None
+                        try:
+                            _t_mstats = get_monthly_stats(t)
+                            if not _t_mstats.empty:
+                                _cm = pd.Timestamp.now().month
+                                _mr = _t_mstats[_t_mstats["MonthName"] == ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][_cm - 1]]
+                                if not _mr.empty:
+                                    _t_season = float(_mr.iloc[0]["AvgReturn"])
+                        except Exception:
+                            pass
+                        t_setup = calculate_trade_setup(t_df, t_signal,
+                                                        ai_predictions=_t_ai_preds, seasonality_avg=_t_season)
                         try:
                             _t_info = get_stock_info(t)
                             _t_ltp = _t_info.get("current_price") or t_latest["Close"]
                         except Exception:
                             _t_ltp = t_latest["Close"]
                         t_patterns = identify_swing_patterns(t_df)
-                        # Multi-factor composite score
-                        tech_score = t_signal.confidence
+                        _d_tech = compute_tech_score(t_latest, t_signal.confidence)
+                        try:
+                            _d_fund_data = get_stock_fundamentals(t)
+                        except Exception:
+                            _d_fund_data = {}
+                        _d_fund = compute_fundamental_score(_d_fund_data)
+                        tech_score = _d_tech / 100.0
+                        fund_score = _d_fund / 100.0
+                        sentiment_score = 0.5
+                        try:
+                            _t_sent = _get_tab_sentiment(t)
+                            if _t_sent and _t_sent.get("score") is not None:
+                                sentiment_score = (_t_sent["score"] + 1.0) / 2.0
+                        except Exception:
+                            pass
                         momentum_score = 0
                         if t_latest["Close"] > t_latest.get("SMA_20", t_latest["Close"]):
                             momentum_score += 0.25
@@ -4242,35 +4429,8 @@ if st.session_state["page"] == "home":
                         roc = t_latest.get("ROC", 0)
                         if roc > 0:
                             momentum_score += min(0.25, roc / 20)
-                        quality_score = 0
-                        rsi_val = t_latest.get("RSI", 50)
-                        if 40 < rsi_val < 65:
-                            quality_score += 0.4
-                        elif 30 < rsi_val <= 40:
-                            quality_score += 0.3
-                        if t_latest.get("ADX", 0) > 25:
-                            quality_score += 0.3
-                        if t_latest.get("Volume_Ratio", 1) > 1.0:
-                            quality_score += 0.3
-                        sentiment_score = 0
-                        if t_patterns:
-                            bullish_patterns = sum(
-                                1 for p in t_patterns if "bullish" in p["implication"].lower())
-                            sentiment_score += min(0.5, bullish_patterns * 0.25)
-                        if "BB_Upper" in t_df.columns and "BB_Lower" in t_df.columns:
-                            bb_range = t_latest["BB_Upper"] - t_latest["BB_Lower"]
-                            if bb_range > 0:
-                                bb_position = (t_latest["Close"] - t_latest["BB_Lower"]) / bb_range
-                                if bb_position < 0.4:
-                                    sentiment_score += 0.5
-                        composite = (0.4 * tech_score + 0.2 * momentum_score +
-                                     0.2 * quality_score + 0.2 * sentiment_score)
-                        _d_tech = compute_tech_score(t_latest, t_signal.confidence)
-                        try:
-                            _d_fund_data = get_stock_fundamentals(t)
-                        except Exception:
-                            _d_fund_data = {}
-                        _d_fund = compute_fundamental_score(_d_fund_data)
+                        composite = (0.30 * tech_score + 0.25 * fund_score +
+                                     0.25 * sentiment_score + 0.20 * momentum_score)
                         _d_ohlol = ""
                         _d_breakout = False
                         _d_gap = ""
@@ -4292,6 +4452,17 @@ if st.session_state["page"] == "home":
                             _d_ai = _get_ai_trend(t)
                         except Exception:
                             pass
+                        _sw_daily_chg = 0.0
+                        _sw_vol_surge = 1.0
+                        try:
+                            if len(t_df) >= 2:
+                                _sw_daily_chg = ((t_latest["Close"] - t_df["Close"].iloc[-2]) / max(t_df["Close"].iloc[-2], 0.01)) * 100
+                                _sw_vol_avg = t_df["Volume"].iloc[-21:-1].mean() if len(t_df) >= 21 else t_df["Volume"].mean()
+                                _sw_vol_surge = t_latest["Volume"] / max(_sw_vol_avg, 1)
+                        except Exception:
+                            pass
+                        _sw_is_momentum = abs(_sw_daily_chg) >= 2 or (_d_breakout and _sw_vol_surge >= 2)
+                        _sw_momentum_type = "bullish" if _sw_daily_chg >= 2 or (_d_breakout and _sw_vol_surge >= 2) else ("bearish" if _sw_daily_chg <= -2 else "")
                         scan_results.append({
                             "ticker": t,
                             "name": POPULAR_INDIAN_STOCKS.get(t, t.replace(".NS", "")),
@@ -4315,6 +4486,10 @@ if st.session_state["page"] == "home":
                             "breakout": _d_breakout,
                             "gap_today": _d_gap,
                             "ai_trend": _d_ai,
+                            "intraday_chg_pct": _sw_daily_chg,
+                            "vol_surge": _sw_vol_surge,
+                            "is_momentum": _sw_is_momentum,
+                            "momentum_type": _sw_momentum_type,
                         })
                     except Exception:
                         pass
@@ -4334,9 +4509,13 @@ if st.session_state["page"] == "home":
         if st.session_state.get("scan_results"):
             results = st.session_state["scan_results"]
 
-            buys = [r for r in results if r["signal"] == "BUY"]
-            sells = [r for r in results if r["signal"] == "SELL"]
-            holds = [r for r in results if r["signal"] == "HOLD"]
+            def _rr_ok(r):
+                s = r.get("setup")
+                return s and s.risk_reward_1 >= 1.0
+
+            buys = [r for r in results if r["signal"] == "BUY" and _rr_ok(r)]
+            sells = [r for r in results if r["signal"] == "SELL" and _rr_ok(r)]
+            holds = [r for r in results if r["signal"] == "HOLD" or (r["signal"] in ("BUY", "SELL") and not _rr_ok(r))]
 
             st.markdown(f"""<div class="quick-stats">
                 <div class="quick-stat">
@@ -4521,11 +4700,51 @@ if st.session_state["page"] == "home":
                     with _sw_short_act_col:
                         st.link_button("Analyze", url=f"?stock={pick['ticker']}&tab=swing", use_container_width=True)
 
+            # Momentum / Breakout section
+            _sw_mom_bull = sorted([r for r in results if r.get("is_momentum") and r.get("momentum_type") == "bullish"], key=lambda x: x["intraday_chg_pct"], reverse=True)
+            _sw_mom_bear = sorted([r for r in results if r.get("is_momentum") and r.get("momentum_type") == "bearish"], key=lambda x: x["intraday_chg_pct"])
+            if _sw_mom_bull or _sw_mom_bear:
+                st.markdown("---")
+                st.markdown("#### Momentum / Breakout")
+                for _mom_list, _mom_label, _mom_color, _mom_arrow, _tab_key in [
+                    (_sw_mom_bull, "Bullish Momentum", "#5eb88a", "▲", "swing"),
+                    (_sw_mom_bear, "Bearish Momentum", "#d45d5d", "▼", "swing"),
+                ]:
+                    if _mom_list:
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:{_mom_color};margin:6px 0 4px;letter-spacing:0.5px;'>{_mom_arrow} {_mom_label}</div>", unsafe_allow_html=True)
+                        for _m in _mom_list:
+                            _m_chg = _m["intraday_chg_pct"]
+                            _m_chg_color = "#5eb88a" if _m_chg >= 0 else "#d45d5d"
+                            _m_chg_sign = "+" if _m_chg >= 0 else ""
+                            _m_vol = _m.get("vol_surge", 1)
+                            _m_vol_color = "#5eb88a" if _m_vol >= 2 else "#d4a054" if _m_vol >= 1.5 else "rgba(255,255,255,0.45)"
+                            _m_sig = _m["signal"]
+                            _m_sig_color = "#5eb88a" if _m_sig == "BUY" else "#d45d5d" if _m_sig == "SELL" else "#d4a054"
+                            _m_brk = '<span style="background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#a855f7;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;">Breakout</span>' if _m.get("breakout") else ""
+                            _m_tv = f"https://in.tradingview.com/chart/Y9P5mgMB/?symbol=NSE%3A{_m['ticker'].replace('.NS','')}"
+                            _m_card, _m_act = st.columns([8, 1], vertical_alignment="center")
+                            with _m_card:
+                                _m_html = f'<div style="background:#16181e;border:1px solid rgba(168,85,247,0.15);border-radius:10px;padding:14px 18px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:12px;min-width:200px;"><div>'
+                                _m_html += f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:700;color:#e8e4de;">{_m["name"]}</span>'
+                                _m_html += f'<a href="{_m_tv}" target="_blank" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:4px;text-decoration:none;color:rgba(255,255,255,0.5);font-size:11px;">↗</a>'
+                                _m_html += f'{_m_brk}</div>'
+                                _m_html += f'<div style="font-size:14px;color:rgba(255,255,255,0.45);font-family:\'JetBrains Mono\',monospace;">₹{_m["price"]:,.2f}</div>'
+                                _m_html += '</div></div>'
+                                _m_html += '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Change</div><div style="font-size:16px;font-weight:700;color:{_m_chg_color};font-family:\'JetBrains Mono\',monospace;">{_m_chg_sign}{_m_chg:.2f}%</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Volume</div><div style="font-size:14px;font-weight:700;color:{_m_vol_color};font-family:\'JetBrains Mono\',monospace;">{_m_vol:.1f}x</div></div>'
+                                _m_html += f'<div style="text-align:center;"><div style="font-size:12px;color:rgba(255,255,255,0.30);text-transform:uppercase;letter-spacing:0.5px;">Signal</div><div style="font-size:13px;font-weight:700;color:{_m_sig_color};">{_m_sig}</div></div>'
+                                _m_html += '</div></div>'
+                                st.markdown(_m_html, unsafe_allow_html=True)
+                            with _m_act:
+                                st.link_button("Analyze", url=f"?stock={_m['ticker']}&tab={_tab_key}", use_container_width=True)
+
             # All Swing Signals table
             st.markdown("---")
             st.markdown("#### All Swing Signals")
-            help_box("<b>Score</b> = Multi-factor composite (Technical 40% + Momentum 20% + Quality 20% + Sentiment 20%). "
-                     "Inspired by BlackRock's SAE methodology.")
+            help_box("<b>Score</b> = Multi-factor composite (Technical 30% + Fundamentals 25% + News Sentiment 25% + Momentum 20%). "
+                     "Only stocks with R:R >= 1:1 are shown as BUY/SELL signals.")
             table_rows = []
             for r in results:
                 sig_emoji = {"BUY": "🟢", "SELL": "🔴",

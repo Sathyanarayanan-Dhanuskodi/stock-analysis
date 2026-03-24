@@ -35,7 +35,8 @@ def add_scalping_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["Cum_VP"] = df.groupby("Date")["VP"].cumsum()
     df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
     df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
-    df.drop(columns=["Typical_Price", "VP", "Date", "Cum_VP", "Cum_Vol"], inplace=True)
+    df.drop(columns=["Typical_Price", "VP", "Date",
+            "Cum_VP", "Cum_Vol"], inplace=True)
 
     # RSI (fast, 7-period for scalping)
     delta = df["Close"].diff()
@@ -78,11 +79,13 @@ def add_scalping_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["Vol_Ratio"] = df["Volume"] / df["Vol_MA_10"]
 
     # Price momentum (rate of change over last 3 candles)
-    df["Momentum_3"] = (df["Close"] - df["Close"].shift(3)) / df["Close"].shift(3) * 100
+    df["Momentum_3"] = (df["Close"] - df["Close"].shift(3)
+                        ) / df["Close"].shift(3) * 100
 
     # Spread / Range
     df["Candle_Range"] = (df["High"] - df["Low"]) / df["Close"] * 100
-    df["Body_Pct"] = abs(df["Close"] - df["Open"]) / (df["High"] - df["Low"]) * 100
+    df["Body_Pct"] = abs(df["Close"] - df["Open"]) / \
+        (df["High"] - df["Low"]) * 100
 
     df.dropna(inplace=True)
     return df
@@ -120,9 +123,11 @@ def _find_best_price(df: pd.DataFrame, lookback: int = 24) -> dict:
         swing_highs = [recent["High"].max()]
 
     supports_below = [s for s in swing_lows if s <= current_price]
-    nearest_support = max(supports_below) if supports_below else min(swing_lows)
+    nearest_support = max(
+        supports_below) if supports_below else min(swing_lows)
     resistances_above = [r for r in swing_highs if r >= current_price]
-    nearest_resistance = min(resistances_above) if resistances_above else max(swing_highs)
+    nearest_resistance = min(
+        resistances_above) if resistances_above else max(swing_highs)
 
     # --- 2. Detect market condition: trending vs ranging ---
     ema5 = recent["EMA_5"].values if "EMA_5" in recent.columns else None
@@ -203,11 +208,15 @@ def _find_best_price(df: pd.DataFrame, lookback: int = 24) -> dict:
         sell_candidates.sort(key=lambda x: x[0])
 
     # Filter out candidates that are too far (> 2x ATR from current price)
-    buy_candidates = [(p, s) for p, s in buy_candidates if abs(current_price - p) <= 2 * atr]
-    sell_candidates = [(p, s) for p, s in sell_candidates if abs(p - current_price) <= 2 * atr]
+    buy_candidates = [(p, s) for p, s in buy_candidates if abs(
+        current_price - p) <= 2 * atr]
+    sell_candidates = [(p, s) for p, s in sell_candidates if abs(
+        p - current_price) <= 2 * atr]
 
-    best_buy = buy_candidates[0] if buy_candidates else (current_price, "current price")
-    best_sell = sell_candidates[0] if sell_candidates else (current_price + atr, "ATR projection")
+    best_buy = buy_candidates[0] if buy_candidates else (
+        current_price, "current price")
+    best_sell = sell_candidates[0] if sell_candidates else (
+        current_price + atr, "ATR projection")
 
     condition = "uptrend" if is_trending_up else "downtrend" if is_trending_down else "ranging"
 
@@ -229,12 +238,13 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     Uses recent price action (last ~2 hours) for entry/exit levels,
     combined with multi-factor confirmation to reduce false signals.
     """
-    latest = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else latest
-    recent_5 = df.tail(5)
+    current_candle = df.iloc[-1]
+    latest = df.iloc[-2] if len(df) > 2 else current_candle
+    prev = df.iloc[-3] if len(df) > 3 else latest
+    recent_5 = df.iloc[-6:-1] if len(df) > 6 else df.tail(5)
 
     # Find best actionable prices from last 2 hours of price action
-    best_prices = _find_best_price(df, lookback=24)
+    best_prices = _find_best_price(df.iloc[:-1] if len(df) > 2 else df, lookback=24)
 
     score = 0
     reasons = []
@@ -268,7 +278,8 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     if len(df) >= 10:
         ema21_now = latest["EMA_21"]
         ema21_prev5 = df.iloc[-6]["EMA_21"] if len(df) > 5 else ema21_now
-        ema21_slope = (ema21_now - ema21_prev5) / ema21_prev5 * 100 if ema21_prev5 > 0 else 0
+        ema21_slope = (ema21_now - ema21_prev5) / \
+            ema21_prev5 * 100 if ema21_prev5 > 0 else 0
         if ema21_slope > 0.05:
             score += 1
             reasons.append(f"EMA 21 trending up ({ema21_slope:+.2f}%)")
@@ -277,7 +288,8 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
             reasons.append(f"EMA 21 trending down ({ema21_slope:+.2f}%)")
 
     # --- VWAP (key institutional level) ---
-    vwap_dist_pct = (latest["Close"] - latest["VWAP"]) / latest["VWAP"] * 100 if latest["VWAP"] > 0 else 0
+    vwap_dist_pct = (latest["Close"] - latest["VWAP"]) / \
+        latest["VWAP"] * 100 if latest["VWAP"] > 0 else 0
     if latest["Close"] > latest["VWAP"]:
         score += 1
         confirmations += 1
@@ -294,14 +306,16 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     if rsi < 20:
         score += 2
         confirmations += 1
-        reasons.append(f"RSI deeply oversold ({rsi:.0f}) - strong bounce likely")
+        reasons.append(
+            f"RSI deeply oversold ({rsi:.0f}) - strong bounce likely")
     elif rsi < 30:
         score += 1
         reasons.append(f"RSI oversold ({rsi:.0f}) - bounce possible")
     elif rsi > 80:
         score -= 2
         confirmations += 1
-        reasons.append(f"RSI deeply overbought ({rsi:.0f}) - strong pullback likely")
+        reasons.append(
+            f"RSI deeply overbought ({rsi:.0f}) - strong pullback likely")
     elif rsi > 70:
         score -= 1
         reasons.append(f"RSI overbought ({rsi:.0f}) - pullback possible")
@@ -336,16 +350,20 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     # --- PRICE ACTION ---
 
     # Bollinger Band — only at clear extremes
-    bb_width_pct = (latest["BB_Upper_Scalp"] - latest["BB_Lower_Scalp"]) / latest["BB_Mid_Scalp"] * 100 if latest["BB_Mid_Scalp"] > 0 else 0
+    bb_width_pct = (latest["BB_Upper_Scalp"] - latest["BB_Lower_Scalp"]) / \
+        latest["BB_Mid_Scalp"] * 100 if latest["BB_Mid_Scalp"] > 0 else 0
     if latest["Close"] <= latest["BB_Lower_Scalp"]:
         score += 1
-        reasons.append(f"Price at/below lower BB (bounce zone, BB width: {bb_width_pct:.2f}%)")
+        reasons.append(
+            f"Price at/below lower BB (bounce zone, BB width: {bb_width_pct:.2f}%)")
     elif latest["Close"] >= latest["BB_Upper_Scalp"]:
         score -= 1
-        reasons.append(f"Price at/above upper BB (rejection zone, BB width: {bb_width_pct:.2f}%)")
+        reasons.append(
+            f"Price at/above upper BB (rejection zone, BB width: {bb_width_pct:.2f}%)")
 
     # Consecutive candle direction (trend persistence)
-    up_candles = sum(1 for i in range(len(recent_5)) if recent_5["Close"].iloc[i] > recent_5["Open"].iloc[i])
+    up_candles = sum(1 for i in range(len(recent_5))
+                     if recent_5["Close"].iloc[i] > recent_5["Open"].iloc[i])
     if up_candles >= 4:
         score += 1
         reasons.append(f"{up_candles}/5 recent candles bullish")
@@ -359,18 +377,22 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
         if latest["Close"] > prev["Close"]:
             score += 2
             confirmations += 1
-            reasons.append(f"Strong volume surge on up candle ({vol_ratio:.1f}x)")
+            reasons.append(
+                f"Strong volume surge on up candle ({vol_ratio:.1f}x)")
         else:
             score -= 2
             confirmations += 1
-            reasons.append(f"Strong volume surge on down candle ({vol_ratio:.1f}x)")
+            reasons.append(
+                f"Strong volume surge on down candle ({vol_ratio:.1f}x)")
     elif vol_ratio > 1.3:
         if latest["Close"] > prev["Close"]:
             score += 1
-            reasons.append(f"Volume above average on up candle ({vol_ratio:.1f}x)")
+            reasons.append(
+                f"Volume above average on up candle ({vol_ratio:.1f}x)")
         else:
             score -= 1
-            reasons.append(f"Volume above average on down candle ({vol_ratio:.1f}x)")
+            reasons.append(
+                f"Volume above average on down candle ({vol_ratio:.1f}x)")
     elif vol_ratio < 0.5:
         # Low volume = unreliable signals, penalize
         if score > 0:
@@ -391,13 +413,14 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     # --- SIGNAL DETERMINATION ---
     # Stricter thresholds: require score >= 4 for Strong, >= 2 for Moderate
     # Also require minimum confirmations (independent factor agreement)
-    current_price = latest["Close"]
+    current_price = current_candle["Close"]
     atr = latest.get("ATR_7", current_price * 0.003)
 
     # Check if ATR is too small relative to price (stock not moving enough)
     atr_pct = atr / current_price * 100 if current_price > 0 else 0
     if atr_pct < 0.15:
-        reasons.append(f"Low ATR ({atr_pct:.2f}%) — tight range, scalping difficult")
+        reasons.append(
+            f"Low ATR ({atr_pct:.2f}%) — tight range, scalping difficult")
         # Dampen signals in tight ranges
         if abs(score) <= 3:
             score = 0
@@ -432,7 +455,8 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
         if target_1 <= entry:
             target_1 = entry + atr
         target_2 = target_1 + 0.5 * atr
-        reasons.append(f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (support), target {target_1:.2f} (resistance) [{condition}]")
+        reasons.append(
+            f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (support), target {target_1:.2f} (resistance) [{condition}]")
     elif signal == "SHORT":
         entry = current_price  # Enter at market price NOW (short)
         # Stop at nearest resistance, capped at 1.5×ATR, but at least 0.5×ATR above entry
@@ -447,7 +471,8 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
         if target_1 >= entry:
             target_1 = entry - atr
         target_2 = target_1 - 0.5 * atr
-        reasons.append(f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (resistance), target {target_1:.2f} (support) [{condition}]")
+        reasons.append(
+            f"Entry at market ({current_price:.2f}), stop at {stop_loss:.2f} (resistance), target {target_1:.2f} (support) [{condition}]")
     else:
         entry = current_price
         stop_loss = current_price - 1.5 * atr
@@ -457,6 +482,11 @@ def generate_scalp_signal(df: pd.DataFrame) -> ScalpSignal:
     risk = abs(entry - stop_loss)
     reward = abs(target_1 - entry)
     rr = reward / risk if risk > 0 else 0
+
+    if signal != "NO_TRADE" and rr < 0.5:
+        signal, strength = "NO_TRADE", "Weak"
+        reasons.append(
+            f"R:R too low ({rr:.2f}) — need at least 0.5 for scalping")
 
     confidence = min(1.0, abs(score) / 10)
 
@@ -473,8 +503,10 @@ def get_scalping_levels(df: pd.DataFrame) -> dict:
     latest = df.iloc[-1]
 
     # Today's data
-    today = df.index[-1].date() if hasattr(df.index[-1], 'date') else df.index[-1]
-    today_data = df[df.index.date == today] if hasattr(df.index[0], 'date') else df.tail(78)  # ~78 5-min candles per day
+    today = df.index[-1].date() if hasattr(df.index[-1],
+                                           'date') else df.index[-1]
+    today_data = df[df.index.date == today] if hasattr(
+        df.index[0], 'date') else df.tail(78)  # ~78 5-min candles per day
 
     # Previous day data (for pivots)
     dates = sorted(set(df.index.date)) if hasattr(df.index[0], 'date') else []
@@ -505,9 +537,12 @@ def get_scalping_levels(df: pd.DataFrame) -> dict:
     cam_s3 = prev_close - cam_range * 1.1 / 4
 
     # Today's range
-    today_high = today_data["High"].max() if len(today_data) > 0 else latest["High"]
-    today_low = today_data["Low"].min() if len(today_data) > 0 else latest["Low"]
-    today_open = today_data["Open"].iloc[0] if len(today_data) > 0 else latest["Open"]
+    today_high = today_data["High"].max() if len(
+        today_data) > 0 else latest["High"]
+    today_low = today_data["Low"].min() if len(
+        today_data) > 0 else latest["Low"]
+    today_open = today_data["Open"].iloc[0] if len(
+        today_data) > 0 else latest["Open"]
 
     vwap = latest.get("VWAP", pp)
 
@@ -533,22 +568,27 @@ def get_market_microstructure(df: pd.DataFrame) -> dict:
     recent = df.tail(20)  # Last 20 candles (~100 mins)
 
     # Trend detection (last 20 candles)
-    ema5 = recent["EMA_5"].values if "EMA_5" in recent.columns else recent["Close"].ewm(span=5).mean().values
+    ema5 = recent["EMA_5"].values if "EMA_5" in recent.columns else recent["Close"].ewm(
+        span=5).mean().values
     trend_slope = (ema5[-1] - ema5[0]) / len(ema5) if len(ema5) > 1 else 0
-    trend = "Uptrend" if trend_slope > 0.05 else "Downtrend" if trend_slope < -0.05 else "Sideways"
+    trend = "Uptrend" if trend_slope > 0.05 else "Downtrend" if trend_slope < - \
+        0.05 else "Sideways"
 
     # Volatility regime
     atr = latest.get("ATR_7", 0)
     avg_atr = recent["ATR_7"].mean() if "ATR_7" in recent.columns else atr
-    vol_regime = "High" if atr > avg_atr * 1.3 else "Low" if atr < avg_atr * 0.7 else "Normal"
+    vol_regime = "High" if atr > avg_atr * \
+        1.3 else "Low" if atr < avg_atr * 0.7 else "Normal"
 
     # Volume profile
     avg_vol = recent["Volume"].mean()
     current_vol = latest["Volume"]
-    vol_status = "Above Average" if current_vol > avg_vol * 1.3 else "Below Average" if current_vol < avg_vol * 0.7 else "Average"
+    vol_status = "Above Average" if current_vol > avg_vol * \
+        1.3 else "Below Average" if current_vol < avg_vol * 0.7 else "Average"
 
     # Spread analysis
-    avg_range = recent["Candle_Range"].mean() if "Candle_Range" in recent.columns else 0
+    avg_range = recent["Candle_Range"].mean(
+    ) if "Candle_Range" in recent.columns else 0
     current_range = latest.get("Candle_Range", 0)
 
     # Consecutive candle direction

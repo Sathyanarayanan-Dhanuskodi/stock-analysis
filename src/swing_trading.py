@@ -426,50 +426,139 @@ def calculate_trade_setup(
     signal: SwingSignal,
     capital: float = 100000,
     max_risk_pct: float = 0.02,
+    ai_predictions: list[float] | None = None,
+    seasonality_avg: float | None = None,
 ) -> TradeSetup:
-    """Calculate full trade setup with entry, stops, targets, position sizing."""
+    """Calculate full trade setup with entry, stops, targets, position sizing.
+
+    Uses S/R levels, Fibonacci, AI predictions, and seasonality to set
+    realistic targets instead of pure R:R multiples.
+    """
     entry_price = df["Close"].iloc[-1]
     atr_data = calculate_atr_stop_loss(df)
     fib_data = calculate_fibonacci_retracements(df)
     sr_data = calculate_support_resistance(df)
+    atr = atr_data["current_atr"]
+
+    ai_target = None
+    if ai_predictions and len(ai_predictions) >= 5:
+        ai_5d = ai_predictions[4]
+        ai_target = ai_5d
+
+    season_bias = 0.0
+    if seasonality_avg is not None:
+        season_bias = seasonality_avg / 100.0
 
     if signal.signal == "BUY":
         stop_loss = atr_data["stop_loss_standard"]
         risk = entry_price - stop_loss
 
-        target_1 = entry_price + 1.5 * risk
-        # Use nearest resistance or Fibonacci extension — but cap at 4:1 R:R
+        nearest_r = sr_data["nearest_resistance"]
         extensions = sorted(fib_data["extensions"].values())
-        fib_t2 = next((e for e in extensions if e > entry_price), entry_price + 2 * risk)
-        target_2 = min(fib_t2, entry_price + 3 * risk)   # cap at 3:1
-        sr_t3 = sr_data["nearest_resistance"] if sr_data["nearest_resistance"] > target_2 else entry_price + 3 * risk
-        target_3 = min(sr_t3, entry_price + 4 * risk)    # cap at 4:1
-        # Ensure strict progression: T2 > T1 > entry, T3 > T2
+        fib_ext_1 = next((e for e in extensions if e > entry_price), None)
+
+        candidates_t1 = []
+        if nearest_r > entry_price + risk:
+            candidates_t1.append(nearest_r)
+        if fib_ext_1 and fib_ext_1 > entry_price + risk:
+            candidates_t1.append(fib_ext_1)
+        if ai_target and ai_target > entry_price + risk:
+            candidates_t1.append(ai_target)
+
+        if candidates_t1:
+            raw_t1 = min(candidates_t1)
+            if season_bias < -0.005:
+                raw_t1 = entry_price + max((raw_t1 - entry_price) * 0.85, risk)
+            target_1 = raw_t1
+        else:
+            target_1 = entry_price + 1.5 * risk
+
+        target_1 = max(target_1, entry_price + risk)
+
+        candidates_t2 = [e for e in extensions if e > target_1] if extensions else []
+        res_above_t1 = [r["price"] for r in sr_data["resistance_levels"] if r["price"] > target_1]
+        candidates_t2.extend(res_above_t1)
+        if ai_target and ai_target > target_1:
+            candidates_t2.append(ai_target)
+
+        if candidates_t2:
+            target_2 = min(candidates_t2)
+        else:
+            target_2 = entry_price + 2 * risk
+
+        if ai_predictions and len(ai_predictions) >= 7:
+            ai_7d = max(ai_predictions[:7])
+            if ai_7d > target_2:
+                target_3 = ai_7d
+            else:
+                target_3 = entry_price + 3 * risk
+        else:
+            target_3 = entry_price + 3 * risk
+
         target_2 = max(target_2, target_1 + 0.5 * risk)
         target_3 = max(target_3, target_2 + 0.5 * risk)
+
     elif signal.signal == "SELL":
-        stop_loss = entry_price + atr_data["current_atr"] * 2
+        stop_loss = entry_price + atr * 2
         risk = stop_loss - entry_price
 
-        target_1 = entry_price - 1.5 * risk
-        # Cap at 4:1 R:R and ensure progression
-        target_2 = max(sr_data["nearest_support"], entry_price - 3 * risk)
-        target_3 = entry_price - 3 * risk
-        target_2 = min(target_2, target_1 - 0.5 * risk)  # ensure T2 < T1
-        target_3 = min(target_3, target_2 - 0.5 * risk)  # ensure T3 < T2
+        nearest_s = sr_data["nearest_support"]
+        extensions = sorted(fib_data["extensions"].values(), reverse=True)
+        fib_ext_1 = next((e for e in extensions if e < entry_price), None)
+
+        candidates_t1 = []
+        if nearest_s < entry_price - risk:
+            candidates_t1.append(nearest_s)
+        if fib_ext_1 and fib_ext_1 < entry_price - risk:
+            candidates_t1.append(fib_ext_1)
+        if ai_target and ai_target < entry_price - risk:
+            candidates_t1.append(ai_target)
+
+        if candidates_t1:
+            raw_t1 = max(candidates_t1)
+            if season_bias > 0.005:
+                raw_t1 = entry_price - max((entry_price - raw_t1) * 0.85, risk)
+            target_1 = raw_t1
+        else:
+            target_1 = entry_price - 1.5 * risk
+
+        target_1 = min(target_1, entry_price - risk)
+
+        sup_below_t1 = [s["price"] for s in sr_data["support_levels"] if s["price"] < target_1]
+        candidates_t2 = [e for e in extensions if e < target_1] if extensions else []
+        candidates_t2.extend(sup_below_t1)
+        if ai_target and ai_target < target_1:
+            candidates_t2.append(ai_target)
+
+        if candidates_t2:
+            target_2 = max(candidates_t2)
+        else:
+            target_2 = entry_price - 2 * risk
+
+        if ai_predictions and len(ai_predictions) >= 7:
+            ai_7d = min(ai_predictions[:7])
+            if ai_7d < target_2:
+                target_3 = ai_7d
+            else:
+                target_3 = entry_price - 3 * risk
+        else:
+            target_3 = entry_price - 3 * risk
+
+        target_2 = min(target_2, target_1 - 0.5 * risk)
+        target_3 = min(target_3, target_2 - 0.5 * risk)
+
     else:  # HOLD
         stop_loss = atr_data["stop_loss_standard"]
         risk = abs(entry_price - stop_loss)
-        target_1 = entry_price + risk
-        target_2 = entry_price + 2 * risk
-        target_3 = entry_price + 3 * risk
+        target_1 = entry_price + atr
+        target_2 = entry_price + 2 * atr
+        target_3 = entry_price + 3 * atr
 
     risk = max(abs(entry_price - stop_loss), 0.01)
 
     def rr(target):
         return round(abs(target - entry_price) / risk, 2)
 
-    # Position sizing based on risk
     risk_amount = capital * max_risk_pct
     shares = int(risk_amount / risk) if risk > 0 else 0
     position_value = shares * entry_price
